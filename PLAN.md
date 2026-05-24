@@ -237,3 +237,8 @@ veritool ff -f rtl/files.f --top soc_top -P CFG_WIDTH=64 --format markdown > ff_
 - DPI / VPI / UDP
 - インタフェース・モジュールポート (modport) — Phase 6 以降
 - フォーマット支援 (整形/lint) — 別ツール領域
+
+
+## 作業の記録
+- フェーズ、または日付ごとに、随時行った作業の記録を DIARY.md に追記すること
+

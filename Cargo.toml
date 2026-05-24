@@ -1,0 +1,26 @@
+[workspace]
+members = [
+    "crates/veritool-core",
+    "crates/veritool-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+authors = ["ORYZA"]
+edition = "2024"
+
+[workspace.dependencies]
+sv-parser = "0.13"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+comfy-table = "7"
+indexmap = { version = "2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+csv = "1"
+thiserror = "1"
+anyhow = "1"
+insta = "1"
+globset = "0.4"

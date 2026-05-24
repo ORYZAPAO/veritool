@@ -1,0 +1,19 @@
+[package]
+name = "veritool-cli"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "veritool"
+path = "src/main.rs"
+
+[dependencies]
+veritool-core = { path = "../veritool-core" }
+clap = { workspace = true }
+tracing = { workspace = true }
+comfy-table = { workspace = true }
+serde_json = { workspace = true }
+csv = { workspace = true }
+anyhow = { workspace = true }
+indexmap = { workspace = true }
