@@ -6,6 +6,31 @@ use crate::design::{
     Range, ResetKind, Signal,
 };
 
+/// Context for conditional generate tracking.
+#[derive(Debug)]
+enum IfGenCtx {
+    /// An `if/else` generate construct.
+    /// `cond`: None = unevaluable (visit both branches), Some(b) = branch taken.
+    /// `block_idx`: how many direct GenerateBlock children we've seen (1=true, 2=false).
+    IfGen { cond: Option<bool>, block_idx: usize },
+    /// A `case` generate construct; tracks the evaluated case expression and
+    /// whether a matching item has already been found.
+    CaseGen { value: Option<i64>, matched: bool },
+    /// A single `case` item (nondefault or default); carries whether this item
+    /// should be processed or skipped.
+    CaseItem { should_process: bool },
+    /// Any other generate context (loop-generate etc.).
+    /// GenerateBlocks inside should not trigger if/else or case skip logic.
+    Other,
+}
+
+/// State for an active `generate for` loop — tracks the iteration count so that
+/// module instantiations inside the body are multiplied accordingly.
+#[derive(Debug)]
+struct LoopCtx {
+    count: usize,
+}
+
 pub fn visit_syntax_tree(tree: &SyntaxTree, file: &Path, design: &mut Design) {
     let mut module_stack: Vec<String> = Vec::new();
     let mut always_stack: Vec<bool> = Vec::new();
@@ -14,8 +39,27 @@ pub fn visit_syntax_tree(tree: &SyntaxTree, file: &Path, design: &mut Design) {
     let mut last_port_dtype = DataType::Logic;
     let mut last_port_packed: Option<Range> = None;
     let mut last_port_net_kind = NetKind::Logic;
+    // Generate if/else / case evaluation state
+    let mut if_gen_stack: Vec<IfGenCtx> = Vec::new();
+    // skip_depth > 0 while we are inside a generate branch that was determined to be false.
+    // Phase 1 (see loop below) symmetrically increments on Enter and decrements on Leave so
+    // skip_depth returns to 0 exactly when the skipped block's Leave fires.
+    let mut skip_depth: usize = 0;
+    // Active generate-for loops; multiplier = product of all counts.
+    let mut loop_stack: Vec<LoopCtx> = Vec::new();
 
     for event in tree.into_iter().event() {
+        // ── Phase 1: skip-mode depth tracking ────────────────────────────
+        // When inside a false generate branch every Enter deepens the count and every
+        // Leave shallows it.  We continue without further processing.
+        if skip_depth > 0 {
+            match event {
+                NodeEvent::Enter(_) => skip_depth += 1,
+                NodeEvent::Leave(_) => skip_depth -= 1,
+            }
+            continue;
+        }
+
         match event {
             NodeEvent::Enter(RefNode::ModuleDeclarationAnsi(m)) => {
                 let name = get_module_name(tree, m).unwrap_or_else(|| "<unknown>".to_string());
@@ -70,6 +114,87 @@ pub fn visit_syntax_tree(tree: &SyntaxTree, file: &Path, design: &mut Design) {
 
             // Only process direct module contents (not nested modules)
             _ if module_stack.len() != 1 => {}
+
+            // ── Generate if/else condition evaluation ─────────────────────────
+            NodeEvent::Enter(RefNode::IfGenerateConstruct(node)) => {
+                let cond = eval_if_generate_cond(tree, node, design, &module_stack);
+                if_gen_stack.push(IfGenCtx::IfGen { cond, block_idx: 0 });
+            }
+            NodeEvent::Leave(RefNode::IfGenerateConstruct(_)) => {
+                if_gen_stack.pop();
+            }
+            // ── generate for loop ─────────────────────────────────────────────
+            NodeEvent::Enter(RefNode::LoopGenerateConstruct(node)) => {
+                let ctx = eval_loop_generate(tree, node, design, &module_stack);
+                loop_stack.push(ctx);
+                // Push Other so inner GenerateBlocks don't affect the enclosing
+                // if-generate branch counter.
+                if_gen_stack.push(IfGenCtx::Other);
+            }
+            NodeEvent::Leave(RefNode::LoopGenerateConstruct(_)) => {
+                loop_stack.pop();
+                if_gen_stack.pop();
+            }
+
+            // ── generate case ─────────────────────────────────────────────────
+            NodeEvent::Enter(RefNode::CaseGenerateConstruct(node)) => {
+                let value = eval_case_generate_expr(tree, node, design, &module_stack);
+                if_gen_stack.push(IfGenCtx::CaseGen { value, matched: false });
+            }
+            NodeEvent::Leave(RefNode::CaseGenerateConstruct(_)) => {
+                if_gen_stack.pop();
+            }
+            NodeEvent::Enter(RefNode::CaseGenerateItemNondefault(item)) => {
+                let should_process = match if_gen_stack.last() {
+                    Some(IfGenCtx::CaseGen { value: Some(case_val), matched: false }) => {
+                        eval_case_item_match(tree, item, design, &module_stack, *case_val)
+                    }
+                    Some(IfGenCtx::CaseGen { value: None, .. }) => true, // unevaluable: keep all
+                    Some(IfGenCtx::CaseGen { matched: true, .. }) => false, // already matched
+                    _ => true,
+                };
+                if_gen_stack.push(IfGenCtx::CaseItem { should_process });
+            }
+            NodeEvent::Leave(RefNode::CaseGenerateItemNondefault(_)) => {
+                if let Some(IfGenCtx::CaseItem { should_process }) = if_gen_stack.pop() {
+                    if should_process {
+                        if let Some(IfGenCtx::CaseGen { matched, .. }) = if_gen_stack.last_mut() {
+                            *matched = true;
+                        }
+                    }
+                }
+            }
+            NodeEvent::Enter(RefNode::CaseGenerateItemDefault(_)) => {
+                let should_process = match if_gen_stack.last() {
+                    Some(IfGenCtx::CaseGen { matched, .. }) => !matched,
+                    _ => true,
+                };
+                if_gen_stack.push(IfGenCtx::CaseItem { should_process });
+            }
+            NodeEvent::Leave(RefNode::CaseGenerateItemDefault(_)) => {
+                if_gen_stack.pop();
+            }
+
+            NodeEvent::Enter(RefNode::GenerateBlock(_)) => {
+                match if_gen_stack.last_mut() {
+                    Some(IfGenCtx::IfGen { cond, block_idx }) => {
+                        *block_idx += 1;
+                        let idx = *block_idx;
+                        let c = *cond;
+                        if matches!((idx, c), (1, Some(false)) | (2, Some(true))) {
+                            skip_depth = 1;
+                        }
+                    }
+                    Some(IfGenCtx::CaseItem { should_process }) => {
+                        if !*should_process {
+                            skip_depth = 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Leave(GenerateBlock) when skip_depth == 0: nothing to do
+            NodeEvent::Leave(RefNode::GenerateBlock(_)) => {}
 
             // ── ANSI port declarations ────────────────────────────────────────
             NodeEvent::Enter(RefNode::AnsiPortDeclarationNet(port)) => {
@@ -160,7 +285,19 @@ pub fn visit_syntax_tree(tree: &SyntaxTree, file: &Path, design: &mut Design) {
                 let mod_name = module_stack[0].clone();
                 let insts = extract_module_instantiation(tree, inst);
                 if let Some(m) = design.modules.get_mut(&mod_name) {
-                    m.instances.extend(insts);
+                    // If inside generate-for loops, create one copy per iteration.
+                    let multiplier: usize = loop_stack.iter().map(|c| c.count).product();
+                    if multiplier <= 1 {
+                        m.instances.extend(insts);
+                    } else {
+                        for inst in &insts {
+                            for k in 0..multiplier {
+                                let mut copy = inst.clone();
+                                copy.inst_name = format!("{}_{}", inst.inst_name, k);
+                                m.instances.push(copy);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -201,6 +338,180 @@ pub fn visit_syntax_tree(tree: &SyntaxTree, file: &Path, design: &mut Design) {
             }
 
             _ => {}
+        }
+    }
+}
+
+// ─── Generate if/else condition evaluator ────────────────────────────────────
+
+/// Try to evaluate the condition of an `if`-generate construct.
+/// Returns `Some(true/false)` when the condition can be resolved with the
+/// parameters known so far; `None` when evaluation fails (both branches kept).
+fn eval_if_generate_cond(
+    tree: &SyntaxTree,
+    node: &sv_parser::IfGenerateConstruct,
+    design: &Design,
+    module_stack: &[String],
+) -> Option<bool> {
+    // node.nodes.1 is Paren<ConstantExpression>; .nodes.1 is the ConstantExpression.
+    let cond_text = tree.get_str(&node.nodes.1.nodes.1)?.trim().to_string();
+    if cond_text.is_empty() {
+        return None;
+    }
+    let mod_name = module_stack.first()?;
+    let module = design.modules.get(mod_name)?;
+    let env = crate::params::ParamEnv::from_module(module);
+    let value = crate::params::evaluate_expr(&cond_text, env.as_map())?;
+    Some(value != 0)
+}
+
+// ─── Generate case helpers ────────────────────────────────────────────────────
+
+/// Evaluate the expression in `case (EXPR)` of a CaseGenerateConstruct.
+fn eval_case_generate_expr(
+    tree: &SyntaxTree,
+    node: &sv_parser::CaseGenerateConstruct,
+    design: &Design,
+    module_stack: &[String],
+) -> Option<i64> {
+    // node.nodes.1 is Paren<ConstantExpression>; .nodes.1 is the ConstantExpression.
+    let expr_text = tree.get_str(&node.nodes.1.nodes.1)?.trim().to_string();
+    if expr_text.is_empty() {
+        return None;
+    }
+    let mod_name = module_stack.first()?;
+    let module = design.modules.get(mod_name)?;
+    let env = crate::params::ParamEnv::from_module(module);
+    crate::params::evaluate_expr(&expr_text, env.as_map())
+}
+
+/// Check whether a nondefault case item matches `case_val`.
+/// Evaluates each constant expression in the item's value list.
+fn eval_case_item_match(
+    tree: &SyntaxTree,
+    item: &sv_parser::CaseGenerateItemNondefault,
+    design: &Design,
+    module_stack: &[String],
+    case_val: i64,
+) -> bool {
+    let Some(mod_name) = module_stack.first() else { return false; };
+    let Some(module) = design.modules.get(mod_name) else { return false; };
+    let env = crate::params::ParamEnv::from_module(module);
+    // item.nodes.0 is List<Symbol, ConstantExpression>; .contents() yields &ConstantExpression.
+    for ce in item.nodes.0.contents() {
+        if let Some(text) = tree.get_str(ce) {
+            if let Some(val) = crate::params::evaluate_expr(text.trim(), env.as_map()) {
+                if val == case_val {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+// ─── Generate for loop helpers ────────────────────────────────────────────────
+
+/// Evaluate a `generate for` loop and return a LoopCtx with the iteration count.
+/// Falls back to count=1 when the loop bounds cannot be determined.
+fn eval_loop_generate(
+    tree: &SyntaxTree,
+    node: &sv_parser::LoopGenerateConstruct,
+    design: &Design,
+    module_stack: &[String],
+) -> LoopCtx {
+    let count = try_eval_loop(tree, node, design, module_stack).unwrap_or(1);
+    LoopCtx { count }
+}
+
+fn try_eval_loop(
+    tree: &SyntaxTree,
+    node: &sv_parser::LoopGenerateConstruct,
+    design: &Design,
+    module_stack: &[String],
+) -> Option<usize> {
+    let inner = &node.nodes.1.nodes.1;
+    // inner: (GenvarInitialization, Symbol, GenvarExpression, Symbol, GenvarIteration)
+    let init = &inner.0;
+    let cond_node = &inner.2;
+    let iter_node = &inner.4;
+
+    // Get genvar variable name
+    let genvar_name = tree.get_str(&init.nodes.1)?.trim().to_string();
+
+    // Get initial value
+    let start_text = tree.get_str(&init.nodes.3)?.trim().to_string();
+    let mod_name = module_stack.first()?;
+    let module = design.modules.get(mod_name)?;
+    let base_env = crate::params::ParamEnv::from_module(module);
+    let start = crate::params::evaluate_expr(&start_text, base_env.as_map())?;
+
+    // Get condition text (GenvarExpression wraps a ConstantExpression)
+    let cond_text = tree.get_str(&cond_node.nodes.0)?.trim().to_string();
+
+    // Determine step delta
+    let step_delta = eval_loop_step(tree, iter_node, base_env.as_map())?;
+
+    // Simulate the loop
+    let mut params = base_env.as_map().clone();
+    let mut i = start;
+    let mut count = 0usize;
+    let max_iters = 65536; // safety cap
+
+    loop {
+        if count >= max_iters {
+            return None; // unbounded or huge loop
+        }
+        params.insert(genvar_name.clone(), i);
+        let cond_val = crate::params::evaluate_expr(&cond_text, &params)?;
+        if cond_val == 0 {
+            break;
+        }
+        count += 1;
+        i = i.checked_add(step_delta)?;
+    }
+
+    Some(count)
+}
+
+/// Compute the per-iteration delta from a GenvarIteration node.
+/// Returns None for unsupported step types.
+fn eval_loop_step(
+    tree: &SyntaxTree,
+    iter: &sv_parser::GenvarIteration,
+    params: &std::collections::HashMap<String, i64>,
+) -> Option<i64> {
+    match iter {
+        sv_parser::GenvarIteration::Suffix(s) => {
+            // s.nodes.0 = GenvarIdentifier, s.nodes.1 = IncOrDecOperator
+            let op = tree.get_str(&s.nodes.1.nodes.0)?.trim().to_string();
+            match op.as_str() {
+                "++" => Some(1),
+                "--" => Some(-1),
+                _ => None,
+            }
+        }
+        sv_parser::GenvarIteration::Prefix(p) => {
+            // p.nodes.0 = IncOrDecOperator, p.nodes.1 = GenvarIdentifier
+            let op = tree.get_str(&p.nodes.0.nodes.0)?.trim().to_string();
+            match op.as_str() {
+                "++" => Some(1),
+                "--" => Some(-1),
+                _ => None,
+            }
+        }
+        sv_parser::GenvarIteration::Assignment(a) => {
+            // a.nodes.0 = GenvarIdentifier, a.nodes.1 = AssignmentOperator, a.nodes.2 = GenvarExpression
+            let op = tree.get_str(&a.nodes.1.nodes.0)?.trim().to_string();
+            // GenvarExpression wraps a ConstantExpression
+            let rhs_text = tree.get_str(&a.nodes.2.nodes.0)?.trim().to_string();
+            let rhs = crate::params::evaluate_expr(&rhs_text, params)?;
+            match op.as_str() {
+                "+=" => Some(rhs),
+                "-=" => Some(-rhs),
+                "*=" | "/=" | "%=" => None, // multiplicative steps unsupported
+                _ => None,
+            }
         }
     }
 }

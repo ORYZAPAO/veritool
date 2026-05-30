@@ -49,7 +49,7 @@ impl ParamEnv {
 pub fn evaluate_expr(expr: &str, params: &HashMap<String, i64>) -> Option<i64> {
     let tokens = tokenize(expr.trim())?;
     let mut pos = 0usize;
-    let result = parse_or(&tokens, &mut pos, params)?;
+    let result = parse_compare(&tokens, &mut pos, params)?;
     if pos == tokens.len() {
         Some(result)
     } else {
@@ -78,7 +78,13 @@ enum Token {
     LShift,   // <<
     RShift,   // >>
     Power,    // **
+    Le,       // <=
+    Ge,       // >=
+    Eq,       // ==
+    Ne,       // !=
     // single-char operators / punctuation
+    Lt,       // <
+    Gt,       // >
     Plus,
     Minus,
     Star,
@@ -143,14 +149,32 @@ fn tokenize(s: &str) -> Option<Vec<Token>> {
                 tokens.push(Token::LShift);
                 i += 2;
             }
+            '<' if i + 1 < chars.len() && chars[i + 1] == '=' => {
+                tokens.push(Token::Le);
+                i += 2;
+            }
             '>' if i + 1 < chars.len() && chars[i + 1] == '>' => {
                 tokens.push(Token::RShift);
+                i += 2;
+            }
+            '>' if i + 1 < chars.len() && chars[i + 1] == '=' => {
+                tokens.push(Token::Ge);
+                i += 2;
+            }
+            '=' if i + 1 < chars.len() && chars[i + 1] == '=' => {
+                tokens.push(Token::Eq);
+                i += 2;
+            }
+            '!' if i + 1 < chars.len() && chars[i + 1] == '=' => {
+                tokens.push(Token::Ne);
                 i += 2;
             }
             '*' if i + 1 < chars.len() && chars[i + 1] == '*' => {
                 tokens.push(Token::Power);
                 i += 2;
             }
+            '<' => { tokens.push(Token::Lt);      i += 1; }
+            '>' => { tokens.push(Token::Gt);      i += 1; }
             '+' => { tokens.push(Token::Plus);    i += 1; }
             '-' => { tokens.push(Token::Minus);   i += 1; }
             '*' => { tokens.push(Token::Star);    i += 1; }
@@ -199,6 +223,23 @@ fn parse_sv_literal(s: &str) -> Option<i64> {
 // ─── Recursive-descent parser ─────────────────────────────────────────────────
 // Precedence (low → high):
 //   |   ^   &   shift   add   mul   power   unary   primary
+
+/// Handles relational and equality operators (lowest precedence above bitwise).
+fn parse_compare(tokens: &[Token], pos: &mut usize, params: &HashMap<String, i64>) -> Option<i64> {
+    let mut v = parse_or(tokens, pos, params)?;
+    loop {
+        match peek(tokens, *pos) {
+            Some(Token::Lt) => { *pos += 1; let r = parse_or(tokens, pos, params)?; v = (v < r) as i64; }
+            Some(Token::Gt) => { *pos += 1; let r = parse_or(tokens, pos, params)?; v = (v > r) as i64; }
+            Some(Token::Le) => { *pos += 1; let r = parse_or(tokens, pos, params)?; v = (v <= r) as i64; }
+            Some(Token::Ge) => { *pos += 1; let r = parse_or(tokens, pos, params)?; v = (v >= r) as i64; }
+            Some(Token::Eq) => { *pos += 1; let r = parse_or(tokens, pos, params)?; v = (v == r) as i64; }
+            Some(Token::Ne) => { *pos += 1; let r = parse_or(tokens, pos, params)?; v = (v != r) as i64; }
+            _ => break,
+        }
+    }
+    Some(v)
+}
 
 fn parse_or(tokens: &[Token], pos: &mut usize, params: &HashMap<String, i64>) -> Option<i64> {
     let mut v = parse_xor(tokens, pos, params)?;
@@ -461,5 +502,24 @@ mod tests {
         // ADDR_W = $clog2(DEPTH) where DEPTH=16 → 4
         let p = params(&[("DEPTH", 16)]);
         assert_eq!(evaluate_expr("$clog2(DEPTH)", &p), Some(4));
+    }
+
+    #[test]
+    fn test_comparison_operators() {
+        let p = params(&[("N", 4), ("I", 3)]);
+        // relational
+        assert_eq!(evaluate_expr("3 < 4", &p),  Some(1));
+        assert_eq!(evaluate_expr("4 < 3", &p),  Some(0));
+        assert_eq!(evaluate_expr("3 <= 3", &p), Some(1));
+        assert_eq!(evaluate_expr("3 >= 4", &p), Some(0));
+        assert_eq!(evaluate_expr("4 > 3", &p),  Some(1));
+        // equality
+        assert_eq!(evaluate_expr("3 == 3", &p), Some(1));
+        assert_eq!(evaluate_expr("3 != 4", &p), Some(1));
+        assert_eq!(evaluate_expr("3 == 4", &p), Some(0));
+        // with params
+        assert_eq!(evaluate_expr("I < N", &p),  Some(1));
+        assert_eq!(evaluate_expr("I < N - 1", &p), Some(0)); // 3 < 3 == 0
+        assert_eq!(evaluate_expr("I <= N - 1", &p), Some(1)); // 3 <= 3 == 1
     }
 }

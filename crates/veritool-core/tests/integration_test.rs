@@ -153,3 +153,53 @@ fn test_fifo_localparam_evaluation() {
     let mem_width = calculate_width_with_params(mem, &env);
     assert_eq!(mem_width, 128, "mem should be 128 bits (8 * 16)");
 }
+
+// ── generate if/else tests ────────────────────────────────────────────────────
+
+#[test]
+fn test_generate_if_default_params() {
+    // gen_if has FAST=1 (default) → fast_core branch taken, slow_core skipped
+    // and WIDE=0 (default) → narrow_bus branch taken, wide_bus skipped
+    let file = fixtures_dir().join("gen_if.sv");
+    let design = loader::parse_sv_files(&[file], &[], &[]).unwrap();
+    let m = design.modules.get("gen_if").expect("gen_if module not found");
+
+    let refs: Vec<&str> = m.instances.iter().map(|i| i.module_ref.as_str()).collect();
+
+    assert!(refs.contains(&"fast_core"),   "fast_core should be instantiated (FAST=1)");
+    assert!(!refs.contains(&"slow_core"),  "slow_core must NOT be instantiated (FAST=1)");
+    assert!(refs.contains(&"narrow_bus"),  "narrow_bus should be instantiated (WIDE=0)");
+    assert!(!refs.contains(&"wide_bus"),   "wide_bus must NOT be instantiated (WIDE=0)");
+}
+
+// ── generate case tests ───────────────────────────────────────────────────────
+
+#[test]
+fn test_generate_case_default_params() {
+    // gen_case has MODE=1 (default) → medium_core selected, small_core and large_core skipped
+    let file = fixtures_dir().join("gen_case.sv");
+    let design = loader::parse_sv_files(&[file], &[], &[]).unwrap();
+    let m = design.modules.get("gen_case").expect("gen_case module not found");
+
+    let refs: Vec<&str> = m.instances.iter().map(|i| i.module_ref.as_str()).collect();
+
+    assert!(refs.contains(&"medium_core"),  "medium_core should be instantiated (MODE=1)");
+    assert!(!refs.contains(&"small_core"),  "small_core must NOT be instantiated (MODE=1)");
+    assert!(!refs.contains(&"large_core"),  "large_core must NOT be instantiated (MODE=1, not default branch)");
+}
+
+// ── generate for loop tests ───────────────────────────────────────────────────
+
+#[test]
+fn test_generate_for_loop_expansion() {
+    // gen_for has N=4 (default) → 4 instances of unit_cell
+    let file = fixtures_dir().join("gen_for.sv");
+    let design = loader::parse_sv_files(&[file], &[], &[]).unwrap();
+    let m = design.modules.get("gen_for").expect("gen_for module not found");
+
+    let unit_cell_count = m.instances.iter()
+        .filter(|i| i.module_ref == "unit_cell")
+        .count();
+
+    assert_eq!(unit_cell_count, 4, "generate for N=4 should produce 4 unit_cell instances");
+}

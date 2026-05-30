@@ -1,0 +1,64 @@
+---
+source: crates/veritool-core/tests/snapshot_tests.rs
+assertion_line: 18
+expression: m
+---
+{
+  "name": "counter",
+  "file": "[file]",
+  "span": "[span]",
+  "params": [
+    {
+      "name": "WIDTH",
+      "value": "8"
+    }
+  ],
+  "ports": [
+    {
+      "name": "clk",
+      "direction": "Input",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": null,
+      "unpacked_dims": []
+    },
+    {
+      "name": "rst",
+      "direction": "Input",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": null,
+      "unpacked_dims": []
+    },
+    {
+      "name": "en",
+      "direction": "Input",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": null,
+      "unpacked_dims": []
+    },
+    {
+      "name": "q",
+      "direction": "Output",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": {
+        "msb": "WIDTH-1",
+        "lsb": "0"
+      },
+      "unpacked_dims": []
+    }
+  ],
+  "signals": [],
+  "instances": [],
+  "ff_decls": [
+    {
+      "signal_name": "q",
+      "packed_width": null,
+      "unpacked_dims": [],
+      "clock_edge": "Posedge",
+      "reset_kind": "None"
+    }
+  ]
+}

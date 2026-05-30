@@ -1,0 +1,10 @@
+---
+source: crates/veritool-cli/tests/snapshot_tests.rs
+assertion_line: 49
+expression: "run(&[\"ports\", \"--format\", \"csv\", f.to_str().unwrap()])"
+---
+module,direction,type,width,name
+counter,input,logic,,clk
+counter,input,logic,,rst
+counter,input,logic,,en
+counter,output,logic,[WIDTH-1:0],q
