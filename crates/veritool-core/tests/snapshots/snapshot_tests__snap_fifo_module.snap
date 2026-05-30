@@ -1,0 +1,157 @@
+---
+source: crates/veritool-core/tests/snapshot_tests.rs
+assertion_line: 29
+expression: m
+---
+{
+  "name": "fifo_sync",
+  "file": "[file]",
+  "span": "[span]",
+  "params": [
+    {
+      "name": "WIDTH",
+      "value": "8"
+    },
+    {
+      "name": "DEPTH",
+      "value": "16"
+    },
+    {
+      "name": "ADDR_W",
+      "value": "$clog2(DEPTH)"
+    }
+  ],
+  "ports": [
+    {
+      "name": "clk",
+      "direction": "Input",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": null,
+      "unpacked_dims": []
+    },
+    {
+      "name": "rst",
+      "direction": "Input",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": null,
+      "unpacked_dims": []
+    },
+    {
+      "name": "wr_en",
+      "direction": "Input",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": null,
+      "unpacked_dims": []
+    },
+    {
+      "name": "rd_en",
+      "direction": "Input",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": null,
+      "unpacked_dims": []
+    },
+    {
+      "name": "wr_data",
+      "direction": "Input",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": {
+        "msb": "WIDTH-1",
+        "lsb": "0"
+      },
+      "unpacked_dims": []
+    },
+    {
+      "name": "rd_data",
+      "direction": "Output",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": {
+        "msb": "WIDTH-1",
+        "lsb": "0"
+      },
+      "unpacked_dims": []
+    },
+    {
+      "name": "full",
+      "direction": "Output",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": null,
+      "unpacked_dims": []
+    },
+    {
+      "name": "empty",
+      "direction": "Output",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": null,
+      "unpacked_dims": []
+    }
+  ],
+  "signals": [
+    {
+      "name": "mem",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": {
+        "msb": "WIDTH-1",
+        "lsb": "0"
+      },
+      "unpacked_dims": [
+        {
+          "msb": "0",
+          "lsb": "DEPTH-1"
+        }
+      ]
+    },
+    {
+      "name": "wr_ptr",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": {
+        "msb": "ADDR_W",
+        "lsb": "0"
+      },
+      "unpacked_dims": []
+    },
+    {
+      "name": "rd_ptr",
+      "net_kind": "Logic",
+      "data_type": "Logic",
+      "packed_width": {
+        "msb": "ADDR_W",
+        "lsb": "0"
+      },
+      "unpacked_dims": []
+    }
+  ],
+  "instances": [],
+  "ff_decls": [
+    {
+      "signal_name": "wr_ptr",
+      "packed_width": null,
+      "unpacked_dims": [],
+      "clock_edge": "Posedge",
+      "reset_kind": "None"
+    },
+    {
+      "signal_name": "rd_ptr",
+      "packed_width": null,
+      "unpacked_dims": [],
+      "clock_edge": "Posedge",
+      "reset_kind": "None"
+    },
+    {
+      "signal_name": "mem",
+      "packed_width": null,
+      "unpacked_dims": [],
+      "clock_edge": "Posedge",
+      "reset_kind": "None"
+    }
+  ]
+}

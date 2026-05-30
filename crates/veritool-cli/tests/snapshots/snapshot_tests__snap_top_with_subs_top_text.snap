@@ -1,0 +1,7 @@
+---
+source: crates/veritool-cli/tests/snapshot_tests.rs
+assertion_line: 139
+expression: "run(&[\"top\", f.to_str().unwrap()])"
+---
+Top modules:
+  top1

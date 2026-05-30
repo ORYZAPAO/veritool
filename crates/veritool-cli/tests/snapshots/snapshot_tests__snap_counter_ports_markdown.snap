@@ -1,0 +1,13 @@
+---
+source: crates/veritool-cli/tests/snapshot_tests.rs
+assertion_line: 43
+expression: "run(&[\"ports\", \"--format\", \"markdown\", f.to_str().unwrap()])"
+---
+## Module: `counter`
+
+| Direction | Type | Width | Name |
+|-----------|------|-------|------|
+| input | logic |  | clk |
+| input | logic |  | rst |
+| input | logic |  | en |
+| output | logic | [WIDTH-1:0] | q |
