@@ -1,0 +1,8 @@
+---
+source: crates/veritool-cli/tests/snapshot_tests.rs
+assertion_line: 105
+expression: "run(&[\"hier\", \"--top\", \"top1\", f.to_str().unwrap()])"
+---
+└─ top1
+   ├─ u_alu (alu)
+   └─ u_rf (reg_file)

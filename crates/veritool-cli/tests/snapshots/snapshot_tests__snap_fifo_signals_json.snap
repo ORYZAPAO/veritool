@@ -1,0 +1,25 @@
+---
+source: crates/veritool-cli/tests/snapshot_tests.rs
+assertion_line: 63
+expression: "run(&[\"signals\", \"-m\", \"fifo_sync\", \"--format\", \"json\", f.to_str().unwrap(),])"
+---
+{
+  "module": "fifo_sync",
+  "signals": [
+    {
+      "name": "mem",
+      "type": "logic",
+      "width": "[WIDTH-1:0]"
+    },
+    {
+      "name": "wr_ptr",
+      "type": "logic",
+      "width": "[ADDR_W:0]"
+    },
+    {
+      "name": "rd_ptr",
+      "type": "logic",
+      "width": "[ADDR_W:0]"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+---
+source: crates/veritool-cli/tests/snapshot_tests.rs
+assertion_line: 31
+expression: "run(&[\"ports\", f.to_str().unwrap()])"
+---
+Module: counter
++-----------+-------+-------------+------+
+| Direction | Type  | Width       | Name |
++========================================+
+| input     | logic |             | clk  |
+|-----------+-------+-------------+------|
+| input     | logic |             | rst  |
+|-----------+-------+-------------+------|
+| input     | logic |             | en   |
+|-----------+-------+-------------+------|
+| output    | logic | [WIDTH-1:0] | q    |
++-----------+-------+-------------+------+

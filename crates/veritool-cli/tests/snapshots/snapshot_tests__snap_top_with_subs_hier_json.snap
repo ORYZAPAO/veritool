@@ -1,0 +1,20 @@
+---
+source: crates/veritool-cli/tests/snapshot_tests.rs
+assertion_line: 111
+expression: "run(&[\"hier\", \"--top\", \"top1\", \"--format\", \"json\", f.to_str().unwrap(),])"
+---
+{
+  "children": [
+    {
+      "children": [],
+      "instance": "u_alu",
+      "module": "alu"
+    },
+    {
+      "children": [],
+      "instance": "u_rf",
+      "module": "reg_file"
+    }
+  ],
+  "module": "top1"
+}

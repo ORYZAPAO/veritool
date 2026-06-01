@@ -1,0 +1,10 @@
+---
+source: crates/veritool-cli/tests/snapshot_tests.rs
+assertion_line: 145
+expression: "run(&[\"top\", \"--format\", \"json\", f.to_str().unwrap()])"
+---
+{
+  "top_modules": [
+    "top1"
+  ]
+}

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use indexmap::IndexMap;
+use serde::Serialize;
 
 #[derive(Debug, Clone)]
 pub struct Design {
@@ -8,7 +9,7 @@ pub struct Design {
     pub files: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Module {
     pub name: String,
     pub file: PathBuf,
@@ -20,13 +21,13 @@ pub struct Module {
     pub ff_decls: Vec<FfDecl>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ParamDecl {
     pub name: String,
     pub value: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Port {
     pub name: String,
     pub direction: Direction,
@@ -36,14 +37,14 @@ pub struct Port {
     pub unpacked_dims: Vec<Range>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Direction {
     Input,
     Output,
     Inout,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum NetKind {
     Wire,
     Logic,
@@ -52,7 +53,7 @@ pub enum NetKind {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum DataType {
     Bit,
     Logic,
@@ -71,13 +72,13 @@ pub enum DataType {
     Custom(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Range {
     pub msb: String,
     pub lsb: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Signal {
     pub name: String,
     pub net_kind: NetKind,
@@ -86,14 +87,14 @@ pub struct Signal {
     pub unpacked_dims: Vec<Range>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Instance {
     pub inst_name: String,
     pub module_ref: String,
     pub param_overrides: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FfDecl {
     pub signal_name: String,
     pub packed_width: Option<Range>,
@@ -102,13 +103,13 @@ pub struct FfDecl {
     pub reset_kind: ResetKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ClockEdge {
     Posedge,
     Negedge,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ResetKind {
     Sync,
     Async,

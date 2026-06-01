@@ -477,3 +477,247 @@ veritool ff --top system top.v picorv32.v simpleuart.v
 | `always @*` / `always_comb` (組合せ) の誤検出なし ✅ | — |
 | ラッチ (`always_latch`) 集計なし | Out of scope |
 | インターフェース・モジュールポート (modport) | Phase 6 |
+
+---
+
+## 2026-05-29 (Thu) — Phase 6: スナップショットテスト + generate if/else 評価
+
+### 作業概要
+
+Phase 6 の残項目をすべて実装した。
+
+1. **`insta` スナップショットテスト** — CLI / コア両方にスナップショットを追加
+2. **`generate if/else` 条件評価** — デフォルトパラメータによる分岐選択を実装
+3. **`design.rs` Serialize 対応** — コアスナップショットのために全型に `#[derive(Serialize)]` を追加
+
+### insta スナップショットテスト
+
+`insta` を workspace dev-dependency に追加し (`features = ["json", "redactions"]`)、以下のスナップショットを整備した。
+
+#### veritool-core スナップショット (3件)
+
+| テスト名 | 内容 |
+|---|---|
+| `snap_counter_module` | counter モジュール全体の JSON (file/span は redact) |
+| `snap_fifo_module` | fifo_sync モジュール全体の JSON |
+| `snap_top_with_subs_instances` | top1 のインスタンスリスト |
+
+#### veritool-cli スナップショット (14件)
+
+`CARGO_BIN_EXE_veritool` を使った process::Command テスト。
+
+| カテゴリ | テスト | fixture |
+|---|---|---|
+| ports × 4形式 | text / json / markdown / csv | counter.sv |
+| signals × 2 | text / json | fifo_sync.sv |
+| ff × 3 | module-json / hierarchy-text / hierarchy-json | counter.sv / fifo_sync.sv |
+| hier × 3 | text / json / markdown | top_with_subs.sv |
+| top × 2 | text / json | top_with_subs.sv |
+
+合計テスト数: **37件** (旧 19 + 新 18)
+
+### generate if/else 条件評価
+
+`visit.rs` にフェーズ分けされたスキップ機構を実装した。
+
+#### 実装方針
+
+```
+for event in tree.into_iter().event() {
+    // Phase 1: skip モード — skip_depth > 0 なら Enter/Leave のたびに深さを増減して continue
+    if skip_depth > 0 { match event { Enter → ++depth, Leave → --depth }; continue; }
+
+    // Phase 2: 通常処理
+    match event {
+        Enter(IfGenerateConstruct) → 条件評価 → if_gen_stack に push
+        Leave(IfGenerateConstruct) → pop
+        Enter(LoopGenerateConstruct/CaseGenerateConstruct) → Other 番兵を push
+        Leave(Loop/Case) → pop
+        Enter(GenerateBlock) → if_gen_stack.last() が IfGen なら branch_idx++
+                               → false 分岐なら skip_depth = 1
+        ...
+    }
+}
+```
+
+`IfGenCtx` enum:
+- `IfGen { cond: Option<bool>, block_idx: usize }` — if-generate の状態
+- `Other` — for/case generate の番兵 (内部 GenerateBlock が branch_idx を変えないようにする)
+
+#### 条件式の取得
+
+```rust
+fn eval_if_generate_cond(tree, node, design, module_stack) -> Option<bool> {
+    // node.nodes.1 = Paren<ConstantExpression>、.nodes.1 = ConstantExpression
+    let cond_text = tree.get_str(&node.nodes.1.nodes.1)?.trim();
+    let env = ParamEnv::from_module(module);
+    let value = evaluate_expr(&cond_text, env.as_map())?;
+    Some(value != 0)
+}
+```
+
+#### 動作検証
+
+```
+# gen_if.sv: parameter FAST=1, WIDE=0 (デフォルト)
+veritool hier gen_if.sv
+└─ gen_if
+   ├─ u_fast (fast_core)    ← FAST=1 → fast 分岐を選択 ✅
+   └─ u_narrow (narrow_bus) ← WIDE=0 → narrow 分岐を選択 ✅
+```
+
+#### picorv32 への影響
+
+| 指標 | 修正前 (誤) | 修正後 (正) |
+|---|---|---|
+| picorv32 own FF | 1368 | 1269 (generate false 分岐の FF を除外) |
+| picorv32 total FF | 2140 | 1269 (pcpi_mul が除外) |
+| system total FF | 133410 | 132539 |
+
+修正前は `generate if (ENABLE_MUL)` と `generate if (ENABLE_FAST_MUL)` の両分岐の
+モジュールが重複表示されていた。修正後はデフォルト値 (ENABLE_MUL=0) で評価し、
+false 分岐 (pcpi_mul) をスキップする。
+
+#### 既知の制限 (更新)
+
+| 制限 | 状態 |
+|---|---|
+| `generate if/else` 条件評価 (デフォルトパラメータ) | ✅ **実装済み** |
+| `generate if/else` — インスタンス overrides を反映 | ⚠️ パース時評価のため未対応 |
+| `generate for` ループ展開 | Phase 7 以降 |
+| `case` generate の条件評価 | Phase 7 以降 |
+| インターフェース・modport | Out of scope |
+
+> **制限の補足**: generate if の条件はパース時にモジュールのデフォルトパラメータで評価する。
+> インスタンス側の `#(.ENABLE_MUL(1))` 上書きはパース時には不明なため、
+> 階層表示は常にデフォルトパラメータに基づく分岐を示す。
+> FF カウントにはインスタンス別パラメータ伝播が適用されるが、
+> 階層インスタンスの有無はデフォルト評価のまま。
+
+### テスト結果
+
+```
+cargo test --workspace
+37 passed, 0 failed
+```
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---|---|
+| `Cargo.toml` (workspace) | insta features = ["json", "redactions"] |
+| `crates/veritool-core/Cargo.toml` | dev-dependencies: insta |
+| `crates/veritool-cli/Cargo.toml` | dev-dependencies: insta |
+| `crates/veritool-core/src/design.rs` | 全型に `#[derive(Serialize)]` 追加 |
+| `crates/veritool-core/src/visit.rs` | IfGenCtx + skip_depth + eval_if_generate_cond |
+| `crates/veritool-core/tests/snapshot_tests.rs` | 新規 (3 スナップショット) |
+| `crates/veritool-core/tests/integration_test.rs` | `test_generate_if_default_params` 追加 |
+| `crates/veritool-cli/tests/snapshot_tests.rs` | 新規 (14 スナップショット) |
+| `tests/fixtures/gen_if.sv` | generate if テスト fixture |
+| `crates/veritool-cli/tests/snapshots/*.snap` | 17 スナップショットファイル |
+
+---
+
+## 2026-05-31 (Sun) — Phase 7: generate case / generate for 実装
+
+### 作業概要
+
+Phase 6 で未対応だった 2 つの generate 構文を実装した。
+
+1. **`generate case` 条件評価** — case 式とアイテム値をパラメータ式として評価し、マッチするブロックのみを処理
+2. **`generate for` ループ展開** — ループ境界を評価してイテレーション数を算出し、モジュールインスタンスを N 倍に複製
+
+### params.rs — 比較演算子の追加
+
+generate for の条件式 (`i < N`, `i <= N-1` 等) を評価するため、トークナイザとパーサに比較演算子を追加した。
+
+**追加したトークン:** `Lt(<)`, `Gt(>)`, `Le(<=)`, `Ge(>=)`, `Eq(==)`, `Ne(!=)`
+
+**パーサ:** `parse_compare` 関数を最低優先度で追加（bitwise OR より下）。エントリポイント `evaluate_expr` が `parse_compare` を呼ぶよう変更。
+
+比較演算子の優先度は SV 標準に準拠: `compare > bitwise_or > bitwise_xor > bitwise_and > shift > add > mul > power > unary > primary`
+
+### visit.rs — case generate
+
+```
+IfGenCtx に 2 つのバリアントを追加:
+  CaseGen { value: Option<i64>, matched: bool }  ← case 文のコンテキスト
+  CaseItem { should_process: bool }               ← 各 case アイテムのコンテキスト
+```
+
+イベントシーケンス:
+1. `Enter(CaseGenerateConstruct)` → case 式を評価して `CaseGen` を push
+2. `Enter(CaseGenerateItemNondefault)` → case 値リストと評価値を比較して `CaseItem` を push
+3. `Leave(CaseGenerateItemNondefault)` → マッチしていたら親の `matched = true` に更新
+4. `Enter(CaseGenerateItemDefault)` → `matched == false` の場合のみ処理
+5. `Enter(GenerateBlock)` → `CaseItem { should_process: false }` なら skip_depth = 1
+
+case 値リストのアクセス: `CaseGenerateItemNondefault.nodes.0` は `List<Symbol, ConstantExpression>` 型。`List::contents()` で `&ConstantExpression` のイテレータを取得し、各値を評価して比較。
+
+### visit.rs — generate for
+
+```
+LoopCtx { count: usize }  ← イテレーション数を保持
+loop_stack: Vec<LoopCtx>  ← ネストループに対応
+```
+
+`eval_loop_generate` / `try_eval_loop`:
+1. `GenvarInitialization` から変数名と初期値を取得
+2. `GenvarExpression` から条件式テキストを取得
+3. `GenvarIteration` から step delta を計算 (`++`/`--` → ±1, `+=`/`-=` → ±rhs)
+4. `{module_params + genvar: i}` の HashMap でループをシミュレート
+
+`ModuleInstantiation` ハンドラ:
+```
+let multiplier = loop_stack.iter().map(|c| c.count).product();
+// 複数コピーを inst_name_0, inst_name_1, ... として追加
+```
+
+ループ境界が評価できない場合 (複雑な式、外部変数など) は `count=1` にフォールバックし、単一インスタンスとして処理する。
+
+### 動作検証
+
+```
+veritool hier tests/fixtures/gen_case.sv
+└─ gen_case
+   └─ u_medium (medium_core)     ← MODE=1 → medium_core ✅
+
+veritool hier tests/fixtures/gen_for.sv
+└─ gen_for
+   ├─ u_cell_0 (unit_cell)
+   ├─ u_cell_1 (unit_cell)
+   ├─ u_cell_2 (unit_cell)
+   └─ u_cell_3 (unit_cell)       ← N=4 → 4 インスタンス ✅
+```
+
+### 既知の制限 (更新)
+
+| 制限 | 状態 |
+|---|---|
+| `generate if/else` 条件評価 (デフォルトパラメータ) | ✅ 実装済み (Phase 6) |
+| `generate case` 条件評価 (デフォルトパラメータ) | ✅ **実装済み** (Phase 7) |
+| `generate for` ループ展開 (デフォルトパラメータ) | ✅ **実装済み** (Phase 7) |
+| `generate case` — インスタンス overrides 反映 | ⚠️ パース時評価のため未対応 |
+| `generate for` — genvar 値のパラメータ伝播 | ⚠️ 全コピー同一パラメータ |
+| `generate for` — 乗算/除算ステップ (`*=`, `/=`) | ⚠️ 未対応 (稀なケース) |
+| `case` generate の xCase (casex/casez) | ⚠️ 未対応 |
+| インターフェース・modport | Out of scope |
+
+### テスト結果
+
+```
+cargo test --workspace
+40 passed, 0 failed
+```
+
+(新規追加: 比較演算子テスト +1, generate case テスト +1, generate for テスト +1)
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---|---|
+| `crates/veritool-core/src/params.rs` | 比較演算子 (Lt/Gt/Le/Ge/Eq/Ne) + parse_compare 追加 |
+| `crates/veritool-core/src/visit.rs` | CaseGen/CaseItem/LoopCtx + case/for generate ハンドラ |
+| `crates/veritool-core/tests/integration_test.rs` | generate case + for テスト追加 |
+| `tests/fixtures/gen_case.sv` | 新規: generate case テスト fixture |
+| `tests/fixtures/gen_for.sv` | 新規: generate for テスト fixture |

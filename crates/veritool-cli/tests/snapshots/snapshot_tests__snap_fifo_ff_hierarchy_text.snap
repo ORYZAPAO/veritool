@@ -1,0 +1,10 @@
+---
+source: crates/veritool-cli/tests/snapshot_tests.rs
+assertion_line: 91
+expression: "run(&[\"ff\", f.to_str().unwrap()])"
+---
++-----------+---------+-----------+
+| Module    | Own FFs | Total FFs |
++=================================+
+| fifo_sync | 138     | 138       |
++-----------+---------+-----------+

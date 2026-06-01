@@ -1,0 +1,12 @@
+---
+source: crates/veritool-cli/tests/snapshot_tests.rs
+assertion_line: 97
+expression: "run(&[\"ff\", \"--format\", \"json\", f.to_str().unwrap()])"
+---
+[
+  {
+    "module": "fifo_sync",
+    "own_ffs": 138,
+    "total_ffs": 138
+  }
+]

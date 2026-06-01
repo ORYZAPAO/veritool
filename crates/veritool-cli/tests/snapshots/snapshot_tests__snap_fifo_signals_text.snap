@@ -1,0 +1,15 @@
+---
+source: crates/veritool-cli/tests/snapshot_tests.rs
+assertion_line: 57
+expression: "run(&[\"signals\", \"-m\", \"fifo_sync\", f.to_str().unwrap()])"
+---
+Module: fifo_sync
++-------+-------------+-------------+--------+
+| Type  | Packed      | Unpacked    | Name   |
++============================================+
+| logic | [WIDTH-1:0] | [0:DEPTH-1] | mem    |
+|-------+-------------+-------------+--------|
+| logic | [ADDR_W:0]  |             | wr_ptr |
+|-------+-------------+-------------+--------|
+| logic | [ADDR_W:0]  |             | rd_ptr |
++-------+-------------+-------------+--------+

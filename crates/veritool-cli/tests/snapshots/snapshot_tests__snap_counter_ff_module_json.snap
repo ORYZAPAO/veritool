@@ -1,0 +1,9 @@
+---
+source: crates/veritool-cli/tests/snapshot_tests.rs
+assertion_line: 78
+expression: "run(&[\"ff\", \"-m\", \"counter\", \"--format\", \"json\", f.to_str().unwrap(),])"
+---
+{
+  "ff_count": 8,
+  "module": "counter"
+}
