@@ -721,3 +721,88 @@ cargo test --workspace
 | `crates/veritool-core/tests/integration_test.rs` | generate case + for テスト追加 |
 | `tests/fixtures/gen_case.sv` | 新規: generate case テスト fixture |
 | `tests/fixtures/gen_for.sv` | 新規: generate for テスト fixture |
+
+---
+
+## 2026-06-03 (Tue) — generate casez / casex 対応
+
+### 作業概要
+
+既知の制限だった `generate casez` / `generate casex` の条件評価を実装した。
+
+### sv-parser の制約と解決策
+
+sv-parser 0.13 の `case_generate_construct` は `case` キーワードしかパースしない (`casez`/`casex` は未対応)。
+ファイルをそのまま渡すとパースエラーになる。
+
+**解決策: 2段階アプローチ**
+
+1. **ローダーでリトライ**: 初回パース失敗時に `preprocess_casez_casex()` でソーステキストを前処理してから `parse_sv_str()` で再パース
+2. **前処理内容**: `casez`/`casex` → `case ` (5文字→5文字、長さ保持) に単語境界を考慮して置換
+3. **自動検出**: visit.rs のアイテムマッチ時に、リテラルが `?`/`z`/`Z`/`x`/`X` を含むかどうかで自動的にワイルドカード照合に切り替え
+
+### ワイルドカードマッチング実装
+
+`CaseType` enum (Case/Casez/Casex) と `wildcard_literal_match()` を実装。
+
+**問題と修正**: params.rs のトークナイザが `2'b1?` を `Num(1)` と誤評価していた (tokenizer が `?` を無視して `2'b1` だけ消費)。`literal_has_wildcards()` で `?`/`z`/`Z`/`x`/`X` を含むリテラルを先に検出し、exact evaluationより先にワイルドカード照合を行うよう修正。
+
+**自動型検出**:
+- リテラルに `x`/`X` を含む → casex 照合 (x もワイルドカード)
+- `?`/`z`/`Z` のみ → casez 照合 (z/? がワイルドカード)
+
+### 対応フォーマット
+
+| パターン | 例 | 動作 |
+|---|---|---|
+| binary + ? | `2'b1?` | bit[0] don't-care |
+| binary + z | `4'b10z0` | bit[1] don't-care |
+| hex + ? | `8'hA?` | lower nibble don't-care |
+| hex + z/Z | `8'hZ0` | upper nibble don't-care |
+| binary + x/X (casex) | `4'bX0X0` | bit[3]/bit[1] don't-care |
+| hex + x/X (casex) | `8'hXF` | upper nibble don't-care |
+
+### 動作検証
+
+```
+# gen_casez_bin: CTRL=2'b10, casez 2'b1? → fast_core ✅
+veritool hier gen_casez.sv
+└─ gen_casez_bin
+   └─ u_fast (fast_core)
+
+# gen_casez_hex: SEL=8'hA3, casez 8'hA? → high_core ✅
+veritool hier --top gen_casez_hex gen_casez.sv
+└─ gen_casez_hex
+   └─ u_high (high_core)
+
+# gen_casex_bin: MODE=4'b1010, casex 4'bX0X0 → even_core ✅
+veritool hier --top gen_casex_bin gen_casez.sv
+└─ gen_casex_bin
+   └─ u_even (even_core)
+```
+
+### テスト結果
+
+```
+cargo test --workspace
+43 passed, 0 failed
+```
+
+(新規追加: casez binary +1, casez hex +1, casex x +1)
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---|---|
+| `crates/veritool-core/src/loader.rs` | preprocess_casez_casex() + parse_sv_str() リトライ |
+| `crates/veritool-core/src/visit.rs` | CaseType enum, literal_has_wildcards(), wildcard_literal_match() |
+| `crates/veritool-core/tests/integration_test.rs` | casez/casex テスト 3件追加 |
+| `tests/fixtures/gen_casez.sv` | 新規: casez/casex テスト fixture |
+
+### 既知の制限 (更新)
+
+| 制限 | 状態 |
+|---|---|
+| `generate casez` / `generate casex` 条件評価 | ✅ **実装済み** |
+| octal wildcard literals (8進数) | ⚠️ 実装済みだが未テスト |
+| `generate if/case/for` — インスタンス overrides 反映 | ⚠️ パース時評価のため未対応 |

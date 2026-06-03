@@ -6,6 +6,10 @@ use crate::design::{
     Range, ResetKind, Signal,
 };
 
+/// Variant of `case` keyword: case / casez / casex.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CaseType { Case, Casez, Casex }
+
 /// Context for conditional generate tracking.
 #[derive(Debug)]
 enum IfGenCtx {
@@ -13,9 +17,9 @@ enum IfGenCtx {
     /// `cond`: None = unevaluable (visit both branches), Some(b) = branch taken.
     /// `block_idx`: how many direct GenerateBlock children we've seen (1=true, 2=false).
     IfGen { cond: Option<bool>, block_idx: usize },
-    /// A `case` generate construct; tracks the evaluated case expression and
-    /// whether a matching item has already been found.
-    CaseGen { value: Option<i64>, matched: bool },
+    /// A `case`/`casez`/`casex` generate construct; tracks the evaluated case expression,
+    /// whether a matching item has already been found, and the case variant.
+    CaseGen { value: Option<i64>, matched: bool, case_type: CaseType },
     /// A single `case` item (nondefault or default); carries whether this item
     /// should be processed or skipped.
     CaseItem { should_process: bool },
@@ -136,18 +140,23 @@ pub fn visit_syntax_tree(tree: &SyntaxTree, file: &Path, design: &mut Design) {
                 if_gen_stack.pop();
             }
 
-            // ── generate case ─────────────────────────────────────────────────
+            // ── generate case / casez / casex ─────────────────────────────────
             NodeEvent::Enter(RefNode::CaseGenerateConstruct(node)) => {
                 let value = eval_case_generate_expr(tree, node, design, &module_stack);
-                if_gen_stack.push(IfGenCtx::CaseGen { value, matched: false });
+                let case_type = match tree.get_str(&node.nodes.0).unwrap_or("case").trim() {
+                    "casez" => CaseType::Casez,
+                    "casex" => CaseType::Casex,
+                    _ => CaseType::Case,
+                };
+                if_gen_stack.push(IfGenCtx::CaseGen { value, matched: false, case_type });
             }
             NodeEvent::Leave(RefNode::CaseGenerateConstruct(_)) => {
                 if_gen_stack.pop();
             }
             NodeEvent::Enter(RefNode::CaseGenerateItemNondefault(item)) => {
                 let should_process = match if_gen_stack.last() {
-                    Some(IfGenCtx::CaseGen { value: Some(case_val), matched: false }) => {
-                        eval_case_item_match(tree, item, design, &module_stack, *case_val)
+                    Some(IfGenCtx::CaseGen { value: Some(case_val), matched: false, case_type }) => {
+                        eval_case_item_match(tree, item, design, &module_stack, *case_val, *case_type)
                     }
                     Some(IfGenCtx::CaseGen { value: None, .. }) => true, // unevaluable: keep all
                     Some(IfGenCtx::CaseGen { matched: true, .. }) => false, // already matched
@@ -386,13 +395,16 @@ fn eval_case_generate_expr(
 }
 
 /// Check whether a nondefault case item matches `case_val`.
-/// Evaluates each constant expression in the item's value list.
+/// Auto-detects casez/casex wildcard matching from the item literal content.
+/// (casez/casex keywords are preprocessed to `case` before sv-parser sees them,
+/// so the actual case variant is inferred from wildcard chars in item values.)
 fn eval_case_item_match(
     tree: &SyntaxTree,
     item: &sv_parser::CaseGenerateItemNondefault,
     design: &Design,
     module_stack: &[String],
     case_val: i64,
+    _case_type: CaseType,
 ) -> bool {
     let Some(mod_name) = module_stack.first() else { return false; };
     let Some(module) = design.modules.get(mod_name) else { return false; };
@@ -400,7 +412,20 @@ fn eval_case_item_match(
     // item.nodes.0 is List<Symbol, ConstantExpression>; .contents() yields &ConstantExpression.
     for ce in item.nodes.0.contents() {
         if let Some(text) = tree.get_str(ce) {
-            if let Some(val) = crate::params::evaluate_expr(text.trim(), env.as_map()) {
+            let text = text.trim();
+            // Detect wildcard characters BEFORE attempting exact evaluation.
+            // The tokenizer in params.rs silently truncates at `?`, so we must
+            // route wildcard literals to wildcard_literal_match directly.
+            if literal_has_wildcards(text) {
+                let wc_type = if text.contains('x') || text.contains('X') {
+                    CaseType::Casex
+                } else {
+                    CaseType::Casez
+                };
+                if matches!(wildcard_literal_match(text, case_val, wc_type), Some(true)) {
+                    return true;
+                }
+            } else if let Some(val) = crate::params::evaluate_expr(text, env.as_map()) {
                 if val == case_val {
                     return true;
                 }
@@ -408,6 +433,91 @@ fn eval_case_item_match(
         }
     }
     false
+}
+
+
+/// True when `text` is a sized bit literal containing wildcard characters
+/// (`?`, `z`/`Z`, or `x`/`X` — the latter is relevant for casex).
+fn literal_has_wildcards(text: &str) -> bool {
+    text.contains('?')
+        || (text.contains('\'')
+            && text.chars().any(|c| matches!(c, 'z' | 'Z' | 'x' | 'X')))
+}
+
+/// Parse a sized bit literal (e.g. `4'b10?z`, `8'hXF`) and check if it matches
+/// `case_val` under the wildcard rules of `case_type`.
+/// Returns `None` when the literal cannot be parsed.
+fn wildcard_literal_match(text: &str, case_val: i64, case_type: CaseType) -> Option<bool> {
+    // Expect [size]'[bBhHoOdD]<digits>
+    let apos = text.find('\'')?;
+    let after = &text[apos + 1..];
+    let (base, digits_raw) = if let Some(d) = after.strip_prefix(|c: char| matches!(c, 'b' | 'B')) {
+        (2u8, d)
+    } else if let Some(d) = after.strip_prefix(|c: char| matches!(c, 'h' | 'H')) {
+        (16u8, d)
+    } else if let Some(d) = after.strip_prefix(|c: char| matches!(c, 'o' | 'O')) {
+        (8u8, d)
+    } else {
+        return None; // decimal with wildcards is unusual; skip
+    };
+
+    let digits: String = digits_raw.chars().filter(|&c| c != '_').collect();
+
+    // Build (value, wildcard_mask) bit-by-bit or nibble-by-nibble.
+    // mask bit = 1 means "don't care".
+    let mut value: i64 = 0;
+    let mut mask: i64 = 0;
+
+    match base {
+        2 => {
+            for ch in digits.chars() {
+                value <<= 1;
+                mask <<= 1;
+                match ch {
+                    '0' => {}
+                    '1' => value |= 1,
+                    '?' | 'z' | 'Z' => mask |= 1,
+                    'x' | 'X' => {
+                        if case_type == CaseType::Casex { mask |= 1; }
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        16 => {
+            for ch in digits.chars() {
+                value <<= 4;
+                mask <<= 4;
+                match ch.to_ascii_lowercase() {
+                    '0'..='9' => value |= ch as i64 - '0' as i64,
+                    'a'..='f' => value |= ch.to_ascii_lowercase() as i64 - 'a' as i64 + 10,
+                    'z' => mask |= 0xF,
+                    '?' => mask |= 0xF,
+                    'x' => {
+                        if case_type == CaseType::Casex { mask |= 0xF; }
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        8 => {
+            for ch in digits.chars() {
+                value <<= 3;
+                mask <<= 3;
+                match ch {
+                    '0'..='7' => value |= ch as i64 - '0' as i64,
+                    'z' | 'Z' | '?' => mask |= 0x7,
+                    'x' | 'X' => {
+                        if case_type == CaseType::Casex { mask |= 0x7; }
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        _ => return None,
+    }
+
+    Some((case_val & !mask) == (value & !mask))
 }
 
 // ─── Generate for loop helpers ────────────────────────────────────────────────

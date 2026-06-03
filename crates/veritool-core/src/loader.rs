@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use sv_parser::{parse_sv, Define, DefineText};
+use sv_parser::{parse_sv, parse_sv_str, Define, DefineText};
 
 use crate::design::Design;
 
@@ -51,6 +51,36 @@ pub fn parse_filelist(filelist_path: &PathBuf) -> anyhow::Result<FileList> {
     Ok(FileList { files, include_dirs, defines })
 }
 
+/// Replace `casez`/`casex` keywords with `case ` (same 5-char length) so
+/// sv-parser accepts the file. Wildcard matching is handled later in visit.rs.
+/// Only replaces whole-word occurrences (not inside identifiers or strings).
+fn preprocess_casez_casex(source: &str) -> String {
+    let src = source.as_bytes();
+    let mut out = Vec::with_capacity(src.len());
+    let mut i = 0;
+    while i < src.len() {
+        let replaced = [b"casez" as &[u8], b"casex"].iter().find_map(|kw| {
+            if !src[i..].starts_with(kw) {
+                return None;
+            }
+            let before_ok = i == 0
+                || !(src[i - 1].is_ascii_alphanumeric() || src[i - 1] == b'_');
+            let after_pos = i + kw.len();
+            let after_ok = after_pos >= src.len()
+                || !(src[after_pos].is_ascii_alphanumeric() || src[after_pos] == b'_');
+            if before_ok && after_ok { Some(kw.len()) } else { None }
+        });
+        if let Some(klen) = replaced {
+            out.extend_from_slice(b"case ");
+            i += klen;
+        } else {
+            out.push(src[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn resolve_path(base: &PathBuf, rel: &str) -> PathBuf {
     if rel.starts_with('/') {
         PathBuf::from(rel)
@@ -77,7 +107,22 @@ pub fn parse_sv_files(
     };
 
     for path in file_paths {
-        match parse_sv(path, &all_defines, include_dirs, false, false) {
+        // First try parsing as-is; on failure, retry with casez/casex preprocessing.
+        let result = parse_sv(path, &all_defines, include_dirs, false, false);
+        let result = match result {
+            ok @ Ok(_) => ok,
+            Err(_) => {
+                // Retry: preprocess casez/casex → case so sv-parser accepts them.
+                match std::fs::read_to_string(path) {
+                    Ok(src) => {
+                        let preprocessed = preprocess_casez_casex(&src);
+                        parse_sv_str(&preprocessed, path, &all_defines, include_dirs, false, false)
+                    }
+                    Err(e) => Err(sv_parser::Error::File { path: path.clone(), source: e }),
+                }
+            }
+        };
+        match result {
             Ok((syntax_tree, new_defines)) => {
                 crate::visit::visit_syntax_tree(&syntax_tree, path, &mut design);
                 // Accumulate defines across files (for `define propagation)

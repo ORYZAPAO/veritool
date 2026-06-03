@@ -203,3 +203,43 @@ fn test_generate_for_loop_expansion() {
 
     assert_eq!(unit_cell_count, 4, "generate for N=4 should produce 4 unit_cell instances");
 }
+
+// ── generate casez / casex tests ─────────────────────────────────────────────
+
+#[test]
+fn test_generate_casez_binary_wildcard() {
+    // gen_casez_bin: CTRL=2'b10, casez 2'b1? matches → fast_core selected
+    let file = fixtures_dir().join("gen_casez.sv");
+    let design = loader::parse_sv_files(&[file], &[], &[]).unwrap();
+    let m = design.modules.get("gen_casez_bin").expect("gen_casez_bin not found");
+    let refs: Vec<&str> = m.instances.iter().map(|i| i.module_ref.as_str()).collect();
+
+    assert!(refs.contains(&"fast_core"),  "fast_core must be selected (CTRL=2'b10 matches 2'b1?)");
+    assert!(!refs.contains(&"slow_core"), "slow_core must NOT be selected");
+    assert!(!refs.contains(&"def_core"),  "def_core must NOT be selected");
+}
+
+#[test]
+fn test_generate_casez_hex_wildcard() {
+    // gen_casez_hex: SEL=8'hA3, casez 8'hA? matches → high_core selected
+    let file = fixtures_dir().join("gen_casez.sv");
+    let design = loader::parse_sv_files(&[file], &[], &[]).unwrap();
+    let m = design.modules.get("gen_casez_hex").expect("gen_casez_hex not found");
+    let refs: Vec<&str> = m.instances.iter().map(|i| i.module_ref.as_str()).collect();
+
+    assert!(refs.contains(&"high_core"),  "high_core must be selected (SEL=0xA3 matches 8'hA?)");
+    assert!(!refs.contains(&"low_core"),  "low_core must NOT be selected");
+    assert!(!refs.contains(&"other_core"),"other_core must NOT be selected");
+}
+
+#[test]
+fn test_generate_casex_x_wildcard() {
+    // gen_casex_bin: MODE=4'b1010, casex 4'bX0X0 matches (bits 3,1 are don't-care)
+    let file = fixtures_dir().join("gen_casez.sv");
+    let design = loader::parse_sv_files(&[file], &[], &[]).unwrap();
+    let m = design.modules.get("gen_casex_bin").expect("gen_casex_bin not found");
+    let refs: Vec<&str> = m.instances.iter().map(|i| i.module_ref.as_str()).collect();
+
+    assert!(refs.contains(&"even_core"),  "even_core must be selected (MODE=4'b1010 matches 4'bX0X0)");
+    assert!(!refs.contains(&"odd_core"),  "odd_core must NOT be selected");
+}
