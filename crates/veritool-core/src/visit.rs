@@ -30,9 +30,14 @@ enum IfGenCtx {
 
 /// State for an active `generate for` loop — tracks the iteration count so that
 /// module instantiations inside the body are multiplied accordingly.
+/// State for an active `generate for` loop.
+/// Tracks iteration count and genvar metadata so param_overrides can be resolved per-iteration.
 #[derive(Debug)]
 struct LoopCtx {
     count: usize,
+    genvar_name: String,
+    start: i64,
+    step: i64,
 }
 
 pub fn visit_syntax_tree(tree: &SyntaxTree, file: &Path, design: &mut Design) {
@@ -293,16 +298,45 @@ pub fn visit_syntax_tree(tree: &SyntaxTree, file: &Path, design: &mut Design) {
             NodeEvent::Enter(RefNode::ModuleInstantiation(inst)) => {
                 let mod_name = module_stack[0].clone();
                 let insts = extract_module_instantiation(tree, inst);
+                // Build base param env before mutable borrow (needed for genvar expr eval).
+                let base_params = design
+                    .modules
+                    .get(&mod_name)
+                    .map(|m| crate::params::ParamEnv::from_module(m).as_map().clone())
+                    .unwrap_or_default();
                 if let Some(m) = design.modules.get_mut(&mod_name) {
                     // If inside generate-for loops, create one copy per iteration.
                     let multiplier: usize = loop_stack.iter().map(|c| c.count).product();
                     if multiplier <= 1 {
                         m.instances.extend(insts);
                     } else {
-                        for inst in &insts {
-                            for k in 0..multiplier {
-                                let mut copy = inst.clone();
-                                copy.inst_name = format!("{}_{}", inst.inst_name, k);
+                        for orig_inst in &insts {
+                            for flat_k in 0..multiplier {
+                                let mut copy = orig_inst.clone();
+                                copy.inst_name = format!("{}_{}", orig_inst.inst_name, flat_k);
+
+                                // Build eval env: module params + genvar values for this iteration.
+                                // loop_stack is outermost-first; iterate innermost-first for decomposition.
+                                let mut eval_map = base_params.clone();
+                                let mut remaining = flat_k;
+                                for ctx in loop_stack.iter().rev() {
+                                    let iter_idx = (remaining % ctx.count) as i64;
+                                    remaining /= ctx.count;
+                                    if !ctx.genvar_name.is_empty() {
+                                        eval_map.insert(
+                                            ctx.genvar_name.clone(),
+                                            ctx.start + iter_idx * ctx.step,
+                                        );
+                                    }
+                                }
+
+                                // Re-evaluate param_overrides using module params + genvar values.
+                                for (_, expr) in &mut copy.param_overrides {
+                                    if let Some(val) = crate::params::evaluate_expr(expr, &eval_map) {
+                                        *expr = val.to_string();
+                                    }
+                                }
+
                                 m.instances.push(copy);
                             }
                         }
@@ -522,16 +556,20 @@ fn wildcard_literal_match(text: &str, case_val: i64, case_type: CaseType) -> Opt
 
 // ─── Generate for loop helpers ────────────────────────────────────────────────
 
-/// Evaluate a `generate for` loop and return a LoopCtx with the iteration count.
-/// Falls back to count=1 when the loop bounds cannot be determined.
+/// Evaluate a `generate for` loop and return a LoopCtx with iteration count and genvar metadata.
+/// Falls back to count=1 with empty genvar when the loop bounds cannot be determined.
 fn eval_loop_generate(
     tree: &SyntaxTree,
     node: &sv_parser::LoopGenerateConstruct,
     design: &Design,
     module_stack: &[String],
 ) -> LoopCtx {
-    let count = try_eval_loop(tree, node, design, module_stack).unwrap_or(1);
-    LoopCtx { count }
+    try_eval_loop(tree, node, design, module_stack).unwrap_or(LoopCtx {
+        count: 1,
+        genvar_name: String::new(),
+        start: 0,
+        step: 1,
+    })
 }
 
 fn try_eval_loop(
@@ -539,7 +577,7 @@ fn try_eval_loop(
     node: &sv_parser::LoopGenerateConstruct,
     design: &Design,
     module_stack: &[String],
-) -> Option<usize> {
+) -> Option<LoopCtx> {
     let inner = &node.nodes.1.nodes.1;
     // inner: (GenvarInitialization, Symbol, GenvarExpression, Symbol, GenvarIteration)
     let init = &inner.0;
@@ -581,7 +619,7 @@ fn try_eval_loop(
         i = i.checked_add(step_delta)?;
     }
 
-    Some(count)
+    Some(LoopCtx { count, genvar_name, start, step: step_delta })
 }
 
 /// Compute the per-iteration delta from a GenvarIteration node.
@@ -990,6 +1028,9 @@ fn extract_module_instantiation(
         return Vec::new();
     };
 
+    // inst.nodes.1 = Option<ParameterValueAssignment> — shared by all instances in this list
+    let param_overrides = extract_param_overrides(tree, inst);
+
     let mut instances = Vec::new();
 
     // inst.nodes.2 = List<Symbol, HierarchicalInstance>
@@ -998,12 +1039,10 @@ fn extract_module_instantiation(
             // hi.nodes.0 = NameOfInstance -> InstanceIdentifier
             if let Some(name_node) = unwrap_node!(hi, InstanceIdentifier) {
                 if let Some(inst_name) = get_identifier_text(tree, name_node) {
-                    // Extract parameter overrides
-                    let param_overrides = extract_param_overrides(tree, hi);
                     instances.push(Instance {
                         inst_name,
                         module_ref: module_ref.clone(),
-                        param_overrides,
+                        param_overrides: param_overrides.clone(),
                     });
                 }
             }
@@ -1012,21 +1051,38 @@ fn extract_module_instantiation(
     instances
 }
 
+/// Extract named parameter overrides from `#(.NAME(expr), ...)` in a `ModuleInstantiation`.
+/// The overrides live in `inst.nodes.1` (`ParameterValueAssignment`), NOT in `HierarchicalInstance`.
 fn extract_param_overrides(
     tree: &SyntaxTree,
-    hi: &sv_parser::HierarchicalInstance,
+    inst: &sv_parser::ModuleInstantiation,
 ) -> Vec<(String, String)> {
     let mut overrides = Vec::new();
-    for node in hi {
+    for node in inst {
         if let RefNode::NamedParameterAssignment(npa) = node {
-            // npa.nodes.1 = ParameterIdentifier, npa.nodes.2 = Paren<Option<ParamExpression>>
+            // npa.nodes: (Symbol[.], ParameterIdentifier, Paren<Option<ParamExpression>>)
             let param_name = if let Some(pid) = unwrap_node!(npa, ParameterIdentifier) {
                 get_identifier_text(tree, pid).unwrap_or_default()
             } else {
                 continue;
             };
-            let param_val = tree.get_str(npa).unwrap_or("").trim().to_string();
-            overrides.push((param_name, param_val));
+            // npa.nodes.2 = Paren<Option<ParamExpression>>
+            // Paren.nodes = (Symbol[open], T, Symbol[close])
+            // → npa.nodes.2.nodes.1 is Option<ParamExpression>
+            let param_val = npa
+                .nodes
+                .2
+                .nodes
+                .1
+                .as_ref()
+                .and_then(|e| tree.get_str(e))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if let (name, Some(val)) = (param_name, param_val) {
+                if !name.is_empty() {
+                    overrides.push((name, val));
+                }
+            }
         }
     }
     overrides

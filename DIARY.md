@@ -806,3 +806,81 @@ cargo test --workspace
 | `generate casez` / `generate casex` 条件評価 | ✅ **実装済み** |
 | octal wildcard literals (8進数) | ⚠️ 実装済みだが未テスト |
 | `generate if/case/for` — インスタンス overrides 反映 | ⚠️ パース時評価のため未対応 |
+
+---
+
+## 2026-06-04 (Wed) — param override 抽出バグ修正 + genvar 値伝播
+
+### 作業概要
+
+`Instance.param_overrides` の抽出バグを発見・修正し、genvar 値をインスタンス param_overrides に正しく伝播する機能を実装した。
+
+### バグ: param_overrides が常に空だった
+
+`extract_param_overrides` が `HierarchicalInstance` から `NamedParameterAssignment` を探していたが、実際の AST 構造は:
+
+```
+ModuleInstantiation
+├── nodes.0: ModuleIdentifier
+├── nodes.1: Option<ParameterValueAssignment>  ← ここに #(.NAME(expr))
+│            └── NamedParameterAssignment
+└── nodes.2: HierarchicalInstance              ← ここは inst_name + ports のみ
+```
+
+**修正**: `extract_param_overrides` を `HierarchicalInstance` → `ModuleInstantiation` を対象に変更。
+また expression 抽出も `tree.get_str(npa)` (`.NAME(expr)` 全体) → `npa.nodes.2.nodes.1` (Paren 内部の式のみ) に修正。
+
+**影響**: `veritool ff` での子モジュール FF 幅計算が修正。例:
+```
+counter_w #(.WIDTH(16)) u_wide   → 16 FF (修正前: 8 FF)
+counter_w #(.WIDTH(4))  u_narrow → 4 FF (修正前: 8 FF)
+```
+
+### genvar 値の param_overrides への伝播
+
+`generate for` ループ内で `#(.IDX(i))` のような genvar 依存の param override が、全イテレーションで同じ式文字列 `"i"` のまま格納されていた問題を修正。
+
+**変更**:
+1. `LoopCtx` に `genvar_name`, `start`, `step` フィールドを追加
+2. `try_eval_loop` の戻り値を `usize` → `LoopCtx` に変更
+3. `ModuleInstantiation` ハンドラでインスタンス複製時に、モジュール param env + genvar 値の合成マップで param_overrides 式を評価
+
+**動作例** (N=3, BASE=2):
+```
+for (i = 0; i < N; i++) begin
+  unit_w #(.WIDTH(BASE + i)) u_unit();
+end
+```
+- u_unit_0: WIDTH = 2+0 = 2 → 2 FF ✅
+- u_unit_1: WIDTH = 2+1 = 3 → 3 FF ✅
+- u_unit_2: WIDTH = 2+2 = 4 → 4 FF ✅
+- total = 9 FF ✅
+
+picorv32 regression なし (system=131138/132539, picorv32=1269, simpleuart=132)。
+
+### テスト結果
+
+```
+cargo test --workspace
+46 passed, 0 failed
+```
+
+(新規追加: param_override 抽出テスト +1, genvar 伝播テスト +1, CLI スナップショット +1)
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---|---|
+| `crates/veritool-core/src/visit.rs` | `extract_param_overrides` バグ修正 (ModuleInstantiation から抽出); `LoopCtx` に genvar 情報追加; `try_eval_loop` 戻り値 LoopCtx 化; genvar eval map 付き inst 複製 |
+| `crates/veritool-core/tests/integration_test.rs` | param override 抽出テスト + genvar 伝播テスト追加 |
+| `crates/veritool-cli/tests/snapshot_tests.rs` | param_override FF hierarchy スナップショットテスト追加 |
+| `tests/fixtures/param_override.sv` | 新規: named param override テスト fixture |
+| `tests/fixtures/gen_for_param.sv` | 新規: genvar param 伝播テスト fixture |
+
+### 既知の制限 (更新)
+
+| 制限 | 状態 |
+|---|---|
+| named param override の抽出 | ✅ **修正済み** |
+| genvar 値の param_overrides 伝播 | ✅ **実装済み** |
+| `generate if/case/for` — インスタンス overrides 反映 | ⚠️ パース時評価のため未対応 (同一モジュールを異なるパラメータで instantiate した場合の generate 条件再評価) |

@@ -1,0 +1,14 @@
+---
+source: crates/veritool-cli/tests/snapshot_tests.rs
+assertion_line: 139
+expression: "run(&[\"ff\", \"--top\", \"param_top\", f.to_str().unwrap()])"
+---
++-----------+---------+-----------+
+| Module    | Own FFs | Total FFs |
++=================================+
+| param_top | 0       | 20        |
+|-----------+---------+-----------|
+| counter_w | 16      | 16        |
+|-----------+---------+-----------|
+| counter_w | 4       | 4         |
++-----------+---------+-----------+
