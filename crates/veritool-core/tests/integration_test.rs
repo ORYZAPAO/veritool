@@ -243,3 +243,53 @@ fn test_generate_casex_x_wildcard() {
     assert!(refs.contains(&"even_core"),  "even_core must be selected (MODE=4'b1010 matches 4'bX0X0)");
     assert!(!refs.contains(&"odd_core"),  "odd_core must NOT be selected");
 }
+
+// ── instance parameter override extraction ───────────────────────────────────
+
+#[test]
+fn test_instance_param_overrides_extracted() {
+    // Verify that #(.NAME(expr)) param overrides are captured in Instance.param_overrides
+    let file = fixtures_dir().join("param_override.sv");
+    let design = loader::parse_sv_files(&[file], &[], &[]).unwrap();
+    let top = design.modules.get("param_top").expect("param_top not found");
+
+    assert_eq!(top.instances.len(), 2, "param_top should have 2 instances");
+
+    let wide = top.instances.iter().find(|i| i.inst_name == "u_wide").expect("u_wide not found");
+    let narrow = top.instances.iter().find(|i| i.inst_name == "u_narrow").expect("u_narrow not found");
+
+    assert!(
+        wide.param_overrides.iter().any(|(k, v)| k == "WIDTH" && v == "16"),
+        "u_wide should have WIDTH=16, got: {:?}", wide.param_overrides
+    );
+    assert!(
+        narrow.param_overrides.iter().any(|(k, v)| k == "WIDTH" && v == "4"),
+        "u_narrow should have WIDTH=4, got: {:?}", narrow.param_overrides
+    );
+}
+
+// ── generate for genvar value propagation ────────────────────────────────────
+
+#[test]
+fn test_genvar_param_propagation() {
+    // gen_for_param: N=3, BASE=2
+    //   i=0: unit_w #(.WIDTH(BASE+0)) → WIDTH="2" (evaluated genvar)
+    //   i=1: unit_w #(.WIDTH(BASE+1)) → WIDTH="3"
+    //   i=2: unit_w #(.WIDTH(BASE+2)) → WIDTH="4"
+    let file = fixtures_dir().join("gen_for_param.sv");
+    let design = loader::parse_sv_files(&[file], &[], &[]).unwrap();
+    let m = design.modules.get("gen_for_param").expect("gen_for_param not found");
+
+    assert_eq!(m.instances.len(), 3, "should have 3 unit_w instances");
+
+    // Check that each instance has the correct WIDTH override
+    let widths: Vec<Option<&str>> = m.instances.iter().map(|inst| {
+        inst.param_overrides.iter()
+            .find(|(k, _)| k == "WIDTH")
+            .map(|(_, v)| v.as_str())
+    }).collect();
+
+    assert!(widths.contains(&Some("2")), "one instance should have WIDTH=2, got: {:?}", widths);
+    assert!(widths.contains(&Some("3")), "one instance should have WIDTH=3, got: {:?}", widths);
+    assert!(widths.contains(&Some("4")), "one instance should have WIDTH=4, got: {:?}", widths);
+}

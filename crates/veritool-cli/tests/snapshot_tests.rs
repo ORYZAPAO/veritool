@@ -131,6 +131,14 @@ fn snap_top_with_subs_hier_markdown() {
     ]));
 }
 
+// ── param overrides ────────────────────────────────────────────────────────
+
+#[test]
+fn snap_param_override_ff_text() {
+    let f = fixtures_dir().join("param_override.sv");
+    insta::assert_snapshot!(run(&["ff", "--top", "param_top", f.to_str().unwrap()]));
+}
+
 // ── top ────────────────────────────────────────────────────────────────────
 
 #[test]
