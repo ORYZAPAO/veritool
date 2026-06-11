@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use veritool_core::{loader, design::Direction, ParamEnv};
+use veritool_core::visit::resolve_instances_with_params;
 use veritool_core::width::calculate_width_with_params;
 use veritool_core::design::Signal;
 
@@ -292,4 +293,70 @@ fn test_genvar_param_propagation() {
     assert!(widths.contains(&Some("2")), "one instance should have WIDTH=2, got: {:?}", widths);
     assert!(widths.contains(&Some("3")), "one instance should have WIDTH=3, got: {:?}", widths);
     assert!(widths.contains(&Some("4")), "one instance should have WIDTH=4, got: {:?}", widths);
+}
+
+// ── generate if branch resolution with instance param overrides ──────────────
+
+#[test]
+fn test_resolve_instances_with_params_default_matches_module_instances() {
+    // For the module's own default params, resolve_instances_with_params must
+    // produce the same instance list as the single-pass `module.instances`.
+    let file = fixtures_dir().join("gen_if_param_override.sv");
+    let design = loader::parse_sv_files(&[file.clone()], &[], &[]).unwrap();
+    let sel_core = design.modules.get("sel_core").expect("sel_core not found");
+    let tree = design.syntax_trees.get(&file).expect("syntax tree not retained");
+
+    let default_env = ParamEnv::from_module(sel_core);
+    let resolved = resolve_instances_with_params(tree, "sel_core", &default_env);
+
+    assert_eq!(resolved, sel_core.instances);
+    // WIDTH=8 (default) -> gen_narrow branch -> narrow_core
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].module_ref, "narrow_core");
+}
+
+#[test]
+fn test_resolve_instances_with_params_reflects_override() {
+    // WIDTH=32 (> 16) must select the gen_wide branch -> wide_core,
+    // even though sel_core's own default WIDTH=8 selects gen_narrow.
+    let file = fixtures_dir().join("gen_if_param_override.sv");
+    let design = loader::parse_sv_files(&[file.clone()], &[], &[]).unwrap();
+    let sel_core = design.modules.get("sel_core").expect("sel_core not found");
+    let tree = design.syntax_trees.get(&file).expect("syntax tree not retained");
+
+    let env = ParamEnv::from_module(sel_core).with_overrides(&[("WIDTH".to_string(), 32)]);
+    let resolved = resolve_instances_with_params(tree, "sel_core", &env);
+
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].module_ref, "wide_core", "WIDTH=32 should select gen_wide -> wide_core");
+}
+
+#[test]
+fn test_ff_hierarchy_reflects_instance_param_overrides_in_generate_if() {
+    // gen_if_override_top instantiates sel_core twice with different WIDTH
+    // overrides; each instance's generate-if branch (and FF count) must
+    // reflect its own override, not sel_core's module-level default.
+    let file = fixtures_dir().join("gen_if_param_override.sv");
+    let design = loader::parse_sv_files(&[file.clone()], &[], &[]).unwrap();
+    let top = design.modules.get("gen_if_override_top").expect("top not found");
+
+    let env = ParamEnv::from_module(top);
+    let instances = design.resolve_instances("gen_if_override_top", &env);
+    assert_eq!(instances.len(), 2);
+
+    for inst in &instances {
+        let child_overrides: Vec<(String, i64)> = inst.param_overrides.iter()
+            .filter_map(|(k, v)| v.parse::<i64>().ok().map(|n| (k.clone(), n)))
+            .collect();
+        let child_module = design.modules.get(&inst.module_ref).expect("sel_core not found");
+        let child_env = ParamEnv::from_module(child_module).with_overrides(&child_overrides);
+        let child_instances = design.resolve_instances(&inst.module_ref, &child_env);
+
+        assert_eq!(child_instances.len(), 1);
+        match inst.inst_name.as_str() {
+            "u_narrow" => assert_eq!(child_instances[0].module_ref, "narrow_core"),
+            "u_wide" => assert_eq!(child_instances[0].module_ref, "wide_core"),
+            other => panic!("unexpected instance name: {}", other),
+        }
+    }
 }

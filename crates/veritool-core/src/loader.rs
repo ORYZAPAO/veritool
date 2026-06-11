@@ -104,6 +104,7 @@ pub fn parse_sv_files(
     let mut design = Design {
         modules: indexmap::IndexMap::new(),
         files: file_paths.to_vec(),
+        syntax_trees: HashMap::new(),
     };
 
     for path in file_paths {
@@ -127,6 +128,7 @@ pub fn parse_sv_files(
                 crate::visit::visit_syntax_tree(&syntax_tree, path, &mut design);
                 // Accumulate defines across files (for `define propagation)
                 all_defines.extend(new_defines);
+                design.syntax_trees.insert(path.clone(), syntax_tree);
             }
             Err(e) => {
                 eprintln!("Warning: failed to parse {}: {}", path.display(), e);

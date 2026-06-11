@@ -1,12 +1,36 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use indexmap::IndexMap;
 use serde::Serialize;
+use sv_parser::SyntaxTree;
 
-#[derive(Debug, Clone)]
+use crate::params::ParamEnv;
+
 pub struct Design {
     pub modules: IndexMap<String, Module>,
     pub files: Vec<PathBuf>,
+    /// Parsed syntax tree for each source file, retained so generate
+    /// constructs can be re-resolved with instance-specific parameter
+    /// overrides (see `resolve_instances`).
+    pub syntax_trees: HashMap<PathBuf, SyntaxTree>,
+}
+
+impl Design {
+    /// Resolve a module's instance list under the given parameter environment.
+    /// Re-evaluates `generate if/case/for` constructs with `env` so that
+    /// instance-specific parameter overrides are reflected in the chosen
+    /// generate branches and loop counts. Falls back to the module's
+    /// default-resolved `instances` if the source syntax tree is unavailable.
+    pub fn resolve_instances(&self, module_name: &str, env: &ParamEnv) -> Vec<Instance> {
+        let Some(module) = self.modules.get(module_name) else {
+            return Vec::new();
+        };
+        match self.syntax_trees.get(&module.file) {
+            Some(tree) => crate::visit::resolve_instances_with_params(tree, module_name, env),
+            None => module.instances.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,7 +111,7 @@ pub struct Signal {
     pub unpacked_dims: Vec<Range>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Instance {
     pub inst_name: String,
     pub module_ref: String,

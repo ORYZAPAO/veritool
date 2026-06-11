@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use sv_parser::{NodeEvent, RefNode, SyntaxTree, unwrap_node};
 
@@ -126,7 +127,8 @@ pub fn visit_syntax_tree(tree: &SyntaxTree, file: &Path, design: &mut Design) {
 
             // ── Generate if/else condition evaluation ─────────────────────────
             NodeEvent::Enter(RefNode::IfGenerateConstruct(node)) => {
-                let cond = eval_if_generate_cond(tree, node, design, &module_stack);
+                let params_map = module_param_env(design, &module_stack);
+                let cond = eval_if_generate_cond(tree, node, &params_map);
                 if_gen_stack.push(IfGenCtx::IfGen { cond, block_idx: 0 });
             }
             NodeEvent::Leave(RefNode::IfGenerateConstruct(_)) => {
@@ -134,7 +136,8 @@ pub fn visit_syntax_tree(tree: &SyntaxTree, file: &Path, design: &mut Design) {
             }
             // ── generate for loop ─────────────────────────────────────────────
             NodeEvent::Enter(RefNode::LoopGenerateConstruct(node)) => {
-                let ctx = eval_loop_generate(tree, node, design, &module_stack);
+                let params_map = module_param_env(design, &module_stack);
+                let ctx = eval_loop_generate(tree, node, &params_map);
                 loop_stack.push(ctx);
                 // Push Other so inner GenerateBlocks don't affect the enclosing
                 // if-generate branch counter.
@@ -147,7 +150,8 @@ pub fn visit_syntax_tree(tree: &SyntaxTree, file: &Path, design: &mut Design) {
 
             // ── generate case / casez / casex ─────────────────────────────────
             NodeEvent::Enter(RefNode::CaseGenerateConstruct(node)) => {
-                let value = eval_case_generate_expr(tree, node, design, &module_stack);
+                let params_map = module_param_env(design, &module_stack);
+                let value = eval_case_generate_expr(tree, node, &params_map);
                 let case_type = match tree.get_str(&node.nodes.0).unwrap_or("case").trim() {
                     "casez" => CaseType::Casez,
                     "casex" => CaseType::Casex,
@@ -161,7 +165,8 @@ pub fn visit_syntax_tree(tree: &SyntaxTree, file: &Path, design: &mut Design) {
             NodeEvent::Enter(RefNode::CaseGenerateItemNondefault(item)) => {
                 let should_process = match if_gen_stack.last() {
                     Some(IfGenCtx::CaseGen { value: Some(case_val), matched: false, case_type }) => {
-                        eval_case_item_match(tree, item, design, &module_stack, *case_val, *case_type)
+                        let params_map = module_param_env(design, &module_stack);
+                        eval_case_item_match(tree, item, &params_map, *case_val, *case_type)
                     }
                     Some(IfGenCtx::CaseGen { value: None, .. }) => true, // unevaluable: keep all
                     Some(IfGenCtx::CaseGen { matched: true, .. }) => false, // already matched
@@ -385,6 +390,202 @@ pub fn visit_syntax_tree(tree: &SyntaxTree, file: &Path, design: &mut Design) {
     }
 }
 
+/// Build the resolved parameter environment (name → value) for the current
+/// (innermost top-level) module being visited.
+fn module_param_env(design: &Design, module_stack: &[String]) -> HashMap<String, i64> {
+    module_stack
+        .first()
+        .and_then(|name| design.modules.get(name))
+        .map(|m| crate::params::ParamEnv::from_module(m).as_map().clone())
+        .unwrap_or_default()
+}
+
+/// Re-resolve a module's instance list under a custom parameter environment.
+///
+/// Re-runs the `generate if/case/for` skip logic using `env` (instead of the
+/// module's own default parameters) so that instance-specific parameter
+/// overrides are reflected in the chosen generate branches and loop counts.
+/// Returns an empty `Vec` if `module_name` is not found in `tree`.
+pub fn resolve_instances_with_params(
+    tree: &SyntaxTree,
+    module_name: &str,
+    env: &crate::params::ParamEnv,
+) -> Vec<Instance> {
+    let params_map = env.as_map();
+    let mut module_stack: Vec<String> = Vec::new();
+    let mut if_gen_stack: Vec<IfGenCtx> = Vec::new();
+    let mut skip_depth: usize = 0;
+    let mut loop_stack: Vec<LoopCtx> = Vec::new();
+    let mut instances: Vec<Instance> = Vec::new();
+
+    for event in tree.into_iter().event() {
+        // ── Module declaration tracking (by reference; doesn't consume `event`) ──
+        match &event {
+            NodeEvent::Enter(RefNode::ModuleDeclarationAnsi(m)) => {
+                let name = get_module_name(tree, m).unwrap_or_else(|| "<unknown>".to_string());
+                module_stack.push(name);
+                continue;
+            }
+            NodeEvent::Leave(RefNode::ModuleDeclarationAnsi(_)) => {
+                let was_target = module_stack.len() == 1 && module_stack[0] == module_name;
+                module_stack.pop();
+                if was_target {
+                    break;
+                }
+                continue;
+            }
+            NodeEvent::Enter(RefNode::ModuleDeclarationNonansi(m)) => {
+                let name =
+                    get_module_name_nonansi(tree, m).unwrap_or_else(|| "<unknown>".to_string());
+                module_stack.push(name);
+                continue;
+            }
+            NodeEvent::Leave(RefNode::ModuleDeclarationNonansi(_)) => {
+                let was_target = module_stack.len() == 1 && module_stack[0] == module_name;
+                module_stack.pop();
+                if was_target {
+                    break;
+                }
+                continue;
+            }
+            _ => {}
+        }
+
+        // Only process the direct contents of the target top-level module.
+        if module_stack.len() != 1 || module_stack[0] != module_name {
+            continue;
+        }
+
+        if skip_depth > 0 {
+            match event {
+                NodeEvent::Enter(_) => skip_depth += 1,
+                NodeEvent::Leave(_) => skip_depth -= 1,
+            }
+            continue;
+        }
+
+        match event {
+            NodeEvent::Enter(RefNode::IfGenerateConstruct(node)) => {
+                let cond = eval_if_generate_cond(tree, node, params_map);
+                if_gen_stack.push(IfGenCtx::IfGen { cond, block_idx: 0 });
+            }
+            NodeEvent::Leave(RefNode::IfGenerateConstruct(_)) => {
+                if_gen_stack.pop();
+            }
+            NodeEvent::Enter(RefNode::LoopGenerateConstruct(node)) => {
+                let ctx = eval_loop_generate(tree, node, params_map);
+                loop_stack.push(ctx);
+                if_gen_stack.push(IfGenCtx::Other);
+            }
+            NodeEvent::Leave(RefNode::LoopGenerateConstruct(_)) => {
+                loop_stack.pop();
+                if_gen_stack.pop();
+            }
+            NodeEvent::Enter(RefNode::CaseGenerateConstruct(node)) => {
+                let value = eval_case_generate_expr(tree, node, params_map);
+                let case_type = match tree.get_str(&node.nodes.0).unwrap_or("case").trim() {
+                    "casez" => CaseType::Casez,
+                    "casex" => CaseType::Casex,
+                    _ => CaseType::Case,
+                };
+                if_gen_stack.push(IfGenCtx::CaseGen { value, matched: false, case_type });
+            }
+            NodeEvent::Leave(RefNode::CaseGenerateConstruct(_)) => {
+                if_gen_stack.pop();
+            }
+            NodeEvent::Enter(RefNode::CaseGenerateItemNondefault(item)) => {
+                let should_process = match if_gen_stack.last() {
+                    Some(IfGenCtx::CaseGen { value: Some(case_val), matched: false, case_type }) => {
+                        eval_case_item_match(tree, item, params_map, *case_val, *case_type)
+                    }
+                    Some(IfGenCtx::CaseGen { value: None, .. }) => true,
+                    Some(IfGenCtx::CaseGen { matched: true, .. }) => false,
+                    _ => true,
+                };
+                if_gen_stack.push(IfGenCtx::CaseItem { should_process });
+            }
+            NodeEvent::Leave(RefNode::CaseGenerateItemNondefault(_)) => {
+                if let Some(IfGenCtx::CaseItem { should_process }) = if_gen_stack.pop() {
+                    if should_process {
+                        if let Some(IfGenCtx::CaseGen { matched, .. }) = if_gen_stack.last_mut() {
+                            *matched = true;
+                        }
+                    }
+                }
+            }
+            NodeEvent::Enter(RefNode::CaseGenerateItemDefault(_)) => {
+                let should_process = match if_gen_stack.last() {
+                    Some(IfGenCtx::CaseGen { matched, .. }) => !matched,
+                    _ => true,
+                };
+                if_gen_stack.push(IfGenCtx::CaseItem { should_process });
+            }
+            NodeEvent::Leave(RefNode::CaseGenerateItemDefault(_)) => {
+                if_gen_stack.pop();
+            }
+            NodeEvent::Enter(RefNode::GenerateBlock(_)) => {
+                match if_gen_stack.last_mut() {
+                    Some(IfGenCtx::IfGen { cond, block_idx }) => {
+                        *block_idx += 1;
+                        let idx = *block_idx;
+                        let c = *cond;
+                        if matches!((idx, c), (1, Some(false)) | (2, Some(true))) {
+                            skip_depth = 1;
+                        }
+                    }
+                    Some(IfGenCtx::CaseItem { should_process }) => {
+                        if !*should_process {
+                            skip_depth = 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            NodeEvent::Leave(RefNode::GenerateBlock(_)) => {}
+
+            NodeEvent::Enter(RefNode::ModuleInstantiation(inst)) => {
+                let insts = extract_module_instantiation(tree, inst);
+                let multiplier: usize = loop_stack.iter().map(|c| c.count).product();
+                if multiplier <= 1 {
+                    instances.extend(insts);
+                } else {
+                    for orig_inst in &insts {
+                        for flat_k in 0..multiplier {
+                            let mut copy = orig_inst.clone();
+                            copy.inst_name = format!("{}_{}", orig_inst.inst_name, flat_k);
+
+                            let mut eval_map = params_map.clone();
+                            let mut remaining = flat_k;
+                            for ctx in loop_stack.iter().rev() {
+                                let iter_idx = (remaining % ctx.count) as i64;
+                                remaining /= ctx.count;
+                                if !ctx.genvar_name.is_empty() {
+                                    eval_map.insert(
+                                        ctx.genvar_name.clone(),
+                                        ctx.start + iter_idx * ctx.step,
+                                    );
+                                }
+                            }
+
+                            for (_, expr) in &mut copy.param_overrides {
+                                if let Some(val) = crate::params::evaluate_expr(expr, &eval_map) {
+                                    *expr = val.to_string();
+                                }
+                            }
+
+                            instances.push(copy);
+                        }
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    instances
+}
+
 // ─── Generate if/else condition evaluator ────────────────────────────────────
 
 /// Try to evaluate the condition of an `if`-generate construct.
@@ -393,18 +594,14 @@ pub fn visit_syntax_tree(tree: &SyntaxTree, file: &Path, design: &mut Design) {
 fn eval_if_generate_cond(
     tree: &SyntaxTree,
     node: &sv_parser::IfGenerateConstruct,
-    design: &Design,
-    module_stack: &[String],
+    params: &HashMap<String, i64>,
 ) -> Option<bool> {
     // node.nodes.1 is Paren<ConstantExpression>; .nodes.1 is the ConstantExpression.
     let cond_text = tree.get_str(&node.nodes.1.nodes.1)?.trim().to_string();
     if cond_text.is_empty() {
         return None;
     }
-    let mod_name = module_stack.first()?;
-    let module = design.modules.get(mod_name)?;
-    let env = crate::params::ParamEnv::from_module(module);
-    let value = crate::params::evaluate_expr(&cond_text, env.as_map())?;
+    let value = crate::params::evaluate_expr(&cond_text, params)?;
     Some(value != 0)
 }
 
@@ -414,18 +611,14 @@ fn eval_if_generate_cond(
 fn eval_case_generate_expr(
     tree: &SyntaxTree,
     node: &sv_parser::CaseGenerateConstruct,
-    design: &Design,
-    module_stack: &[String],
+    params: &HashMap<String, i64>,
 ) -> Option<i64> {
     // node.nodes.1 is Paren<ConstantExpression>; .nodes.1 is the ConstantExpression.
     let expr_text = tree.get_str(&node.nodes.1.nodes.1)?.trim().to_string();
     if expr_text.is_empty() {
         return None;
     }
-    let mod_name = module_stack.first()?;
-    let module = design.modules.get(mod_name)?;
-    let env = crate::params::ParamEnv::from_module(module);
-    crate::params::evaluate_expr(&expr_text, env.as_map())
+    crate::params::evaluate_expr(&expr_text, params)
 }
 
 /// Check whether a nondefault case item matches `case_val`.
@@ -435,14 +628,10 @@ fn eval_case_generate_expr(
 fn eval_case_item_match(
     tree: &SyntaxTree,
     item: &sv_parser::CaseGenerateItemNondefault,
-    design: &Design,
-    module_stack: &[String],
+    params: &HashMap<String, i64>,
     case_val: i64,
     _case_type: CaseType,
 ) -> bool {
-    let Some(mod_name) = module_stack.first() else { return false; };
-    let Some(module) = design.modules.get(mod_name) else { return false; };
-    let env = crate::params::ParamEnv::from_module(module);
     // item.nodes.0 is List<Symbol, ConstantExpression>; .contents() yields &ConstantExpression.
     for ce in item.nodes.0.contents() {
         if let Some(text) = tree.get_str(ce) {
@@ -459,7 +648,7 @@ fn eval_case_item_match(
                 if matches!(wildcard_literal_match(text, case_val, wc_type), Some(true)) {
                     return true;
                 }
-            } else if let Some(val) = crate::params::evaluate_expr(text, env.as_map()) {
+            } else if let Some(val) = crate::params::evaluate_expr(text, params) {
                 if val == case_val {
                     return true;
                 }
@@ -561,10 +750,9 @@ fn wildcard_literal_match(text: &str, case_val: i64, case_type: CaseType) -> Opt
 fn eval_loop_generate(
     tree: &SyntaxTree,
     node: &sv_parser::LoopGenerateConstruct,
-    design: &Design,
-    module_stack: &[String],
+    params: &HashMap<String, i64>,
 ) -> LoopCtx {
-    try_eval_loop(tree, node, design, module_stack).unwrap_or(LoopCtx {
+    try_eval_loop(tree, node, params).unwrap_or(LoopCtx {
         count: 1,
         genvar_name: String::new(),
         start: 0,
@@ -575,8 +763,7 @@ fn eval_loop_generate(
 fn try_eval_loop(
     tree: &SyntaxTree,
     node: &sv_parser::LoopGenerateConstruct,
-    design: &Design,
-    module_stack: &[String],
+    params: &HashMap<String, i64>,
 ) -> Option<LoopCtx> {
     let inner = &node.nodes.1.nodes.1;
     // inner: (GenvarInitialization, Symbol, GenvarExpression, Symbol, GenvarIteration)
@@ -589,19 +776,16 @@ fn try_eval_loop(
 
     // Get initial value
     let start_text = tree.get_str(&init.nodes.3)?.trim().to_string();
-    let mod_name = module_stack.first()?;
-    let module = design.modules.get(mod_name)?;
-    let base_env = crate::params::ParamEnv::from_module(module);
-    let start = crate::params::evaluate_expr(&start_text, base_env.as_map())?;
+    let start = crate::params::evaluate_expr(&start_text, params)?;
 
     // Get condition text (GenvarExpression wraps a ConstantExpression)
     let cond_text = tree.get_str(&cond_node.nodes.0)?.trim().to_string();
 
     // Determine step delta
-    let step_delta = eval_loop_step(tree, iter_node, base_env.as_map())?;
+    let step_delta = eval_loop_step(tree, iter_node, params)?;
 
     // Simulate the loop
-    let mut params = base_env.as_map().clone();
+    let mut params = params.clone();
     let mut i = start;
     let mut count = 0usize;
     let max_iters = 65536; // safety cap

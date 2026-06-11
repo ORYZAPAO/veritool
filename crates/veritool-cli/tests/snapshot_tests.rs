@@ -139,6 +139,14 @@ fn snap_param_override_ff_text() {
     insta::assert_snapshot!(run(&["ff", "--top", "param_top", f.to_str().unwrap()]));
 }
 
+#[test]
+fn snap_gen_if_param_override_ff_text() {
+    // Each sel_core instance overrides WIDTH, which flips the generate-if
+    // branch (gen_narrow/gen_wide) selecting narrow_core vs wide_core.
+    let f = fixtures_dir().join("gen_if_param_override.sv");
+    insta::assert_snapshot!(run(&["ff", "--top", "gen_if_override_top", f.to_str().unwrap()]));
+}
+
 // ── top ────────────────────────────────────────────────────────────────────
 
 #[test]
