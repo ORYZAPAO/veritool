@@ -16,5 +16,3 @@ pub mod report;
 
 pub use design::*;
 pub use params::ParamEnv;
-
-// temporary debug: expose for testing
