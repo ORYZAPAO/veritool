@@ -883,4 +883,89 @@ cargo test --workspace
 |---|---|
 | named param override の抽出 | ✅ **修正済み** |
 | genvar 値の param_overrides 伝播 | ✅ **実装済み** |
-| `generate if/case/for` — インスタンス overrides 反映 | ⚠️ パース時評価のため未対応 (同一モジュールを異なるパラメータで instantiate した場合の generate 条件再評価) |
+| `generate if/case/for` — インスタンス overrides 反映 | ✅ **実装済み (2026-06-11)** — `ff` 階層集計で対応 |
+
+## 2026-06-11 (Wed) — generate if/case/for のインスタンス param overrides 反映
+
+### 課題
+
+`design.modules[name].instances` はパース時に一度だけ、モジュール自身のデフォルト
+パラメータで `generate if/case/for` を評価して確定させていた。そのため、同一モジュールを
+異なる `#(.PARAM(...))` でインスタンス化しても、子モジュール内部の generate 分岐選択や
+ループ展開数は常にデフォルト値のまま — `ff` 階層の FF 集計が実際の RTL と乖離する
+既知の制限だった (例: picorv32 で `ENABLE_MUL`/`ENABLE_DIV` をトップから 1 に
+オーバーライドしても `pcpi_mul`/`pcpi_div` が集計から漏れる)。
+
+### 変更内容
+
+1. **`Design` に `syntax_trees: HashMap<PathBuf, SyntaxTree>` を追加**
+   - `loader::parse_sv_files` で各ファイルの `SyntaxTree` を保持 (`Design::clone`/`Debug` は
+     `SyntaxTree` が非対応のため derive を削除)。
+
+2. **generate 条件評価ヘルパーを `Design`/`module_stack` から分離**
+   - `eval_if_generate_cond` / `eval_case_generate_expr` / `eval_case_item_match` /
+     `eval_loop_generate` / `try_eval_loop` の引数を `(design, module_stack)` →
+     `&HashMap<String, i64>` (パラメータ環境マップ) に変更。
+   - 既存の単一パス visitor 用に `module_param_env(design, module_stack)` ヘルパーを追加。
+
+3. **新関数 `visit::resolve_instances_with_params(tree, module_name, env) -> Vec<Instance>`**
+   - 指定モジュールの本体だけを再走査し、`if/case/for` generate のスキップロジックを
+     `env` (呼び出し側で合成したパラメータ環境) で再評価してインスタンス一覧を再構築。
+   - `Design::resolve_instances(module_name, env)` から呼び出し、`syntax_trees` が
+     無い場合は従来通り `module.instances.clone()` にフォールバック。
+
+4. **`collect_ff_rows` (FF 階層集計) を `resolve_instances` 経由に変更**
+   - 各モジュールについて `env = ParamEnv::from_module(module).with_overrides(instance_overrides)`
+     を計算した直後に `design.resolve_instances(mod_name, &env)` で子インスタンス一覧を
+     取得 → generate 分岐がインスタンスごとの override を反映するようになった。
+
+### 動作確認
+
+新規 fixture `tests/fixtures/gen_if_param_override.sv`:
+```systemverilog
+module sel_core #(parameter WIDTH = 8) (...);
+    generate
+        if (WIDTH > 16) begin : gen_wide
+            wide_core u_core (...);   // q[31:0] → 32 FF
+        end else begin : gen_narrow
+            narrow_core u_core (...); // q[7:0]  → 8 FF
+        end
+    endgenerate
+endmodule
+
+module gen_if_override_top ();
+    sel_core #(.WIDTH(8))  u_narrow (); // gen_narrow → narrow_core (8 FF)
+    sel_core #(.WIDTH(32)) u_wide   (); // gen_wide   → wide_core (32 FF)
+endmodule
+```
+`veritool ff --top gen_if_override_top` → `sel_core` が WIDTH に応じて
+`narrow_core`(8) / `wide_core`(32) を正しく出し分け、合計 40 FF。
+
+**picorv32 regression (修正による実値変化を確認)**:
+- `top.v` は `picorv32 #(.ENABLE_MUL(1), .ENABLE_DIV(1), ...)` でオーバーライドしている。
+- 修正前: `picorv32` (デフォルト ENABLE_MUL=0/ENABLE_DIV=0) → `pcpi_mul`/`pcpi_div` が
+  集計に含まれず、picorv32 total = 1269。
+- 修正後: override が伝播し `pcpi_mul`(305) + `pcpi_div`(201) が追加で集計される
+  → picorv32 total = 1775、system total = 133045 (+506)。
+  → **これは undercount の修正**(従来値が過小評価だった)。
+
+### テスト結果
+
+```
+cargo test --workspace
+50 passed, 0 failed
+```
+(新規: `resolve_instances_with_params` の default 一致テスト・override 反映テスト・
+`ff` 階層 override テスト + CLI スナップショット 1件)
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---|---|
+| `crates/veritool-core/src/design.rs` | `syntax_trees` フィールド追加、`Design::resolve_instances`、`Instance` に `PartialEq` 追加、`Debug`/`Clone` derive 削除 |
+| `crates/veritool-core/src/loader.rs` | パース後の `SyntaxTree` を `design.syntax_trees` に保存 |
+| `crates/veritool-core/src/visit.rs` | generate 評価ヘルパーを env ベースに分離、`resolve_instances_with_params` 新設 |
+| `crates/veritool-cli/src/format/text.rs` | `collect_ff_rows` が `design.resolve_instances` を使用 |
+| `crates/veritool-core/tests/integration_test.rs` | override 反映の単体テスト追加 |
+| `crates/veritool-cli/tests/snapshot_tests.rs` | `gen_if_override_top` の `ff` スナップショット追加 |
+| `tests/fixtures/gen_if_param_override.sv` | 新規 fixture |

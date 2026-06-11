@@ -624,9 +624,14 @@ fn collect_ff_rows(
         let env = ParamEnv::from_module(module).with_overrides(instance_overrides);
         let own = count_module_ffs_with_env(module, &env);
 
+        // Re-resolve generate if/case/for branches with this env so that
+        // instance-specific parameter overrides are reflected in the
+        // child instance list (not just the default-param resolution).
+        let instances = design.resolve_instances(mod_name, &env);
+
         // Recursively process children
         let mut child_total = 0i64;
-        for inst in &module.instances {
+        for inst in &instances {
             // Evaluate this instance's parameter overrides in the current env
             let child_overrides: Vec<(String, i64)> = inst
                 .param_overrides
